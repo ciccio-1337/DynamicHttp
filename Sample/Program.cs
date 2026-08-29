@@ -9,15 +9,15 @@ builder.Services.AddDynamicHttp(options =>
     options.OpenApi.Enabled = true;
     options.OpenApi.Provider = new AspNetCoreOpenApiProvider();
 });
+builder.Services.AddAuthentication();
+builder.Services.AddAuthorizationBuilder().AddPolicy("users.read", policy => policy.RequireClaim("users.read", ["true"]));
 
 var app = builder.Build();
 
 app.UseDynamicHttpExceptionHandling();
 app.UseAuthentication();
 app.UseAuthorization();
-
 app.MapDynamicHttp();
-
 app.Run();
 
 namespace Sample

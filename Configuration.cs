@@ -43,7 +43,6 @@ public static class DynamicHttpServiceCollectionExtensions
 
         services.AddSingleton(options);
         services.AddSingleton<DynamicHttpRegistry>();
-        services.AddSingleton<DynamicHttpExceptionHandler>();
         services.AddSingleton<IDynamicHttpValidator, NoOpValidator>();
 
         foreach (var assembly in options.Assemblies.Distinct())

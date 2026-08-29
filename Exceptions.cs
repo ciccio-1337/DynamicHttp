@@ -32,9 +32,9 @@ public class BadRequestHttpException(string detail) : Exception(detail), IHttpEx
     public string? Type => "https://httpstatuses.com/400";
 }
 
-public sealed class DynamicHttpExceptionHandler(ILogger<DynamicHttpExceptionHandler> logger)
+public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<DynamicHttpExceptionHandler> logger)
 {
-    public async Task InvokeAsync(HttpContext context, RequestDelegate next)
+    public async Task InvokeAsync(HttpContext context)
     {
         try
         {
@@ -69,7 +69,6 @@ public sealed class DynamicHttpExceptionHandler(ILogger<DynamicHttpExceptionHand
 
 public static class DynamicHttpExceptionApplicationExtensions
 {
-    public static IApplicationBuilder UseDynamicHttpExceptionHandling(
-        this IApplicationBuilder app) =>
+    public static IApplicationBuilder UseDynamicHttpExceptionHandling(this IApplicationBuilder app) =>
         app.UseMiddleware<DynamicHttpExceptionHandler>();
 }
