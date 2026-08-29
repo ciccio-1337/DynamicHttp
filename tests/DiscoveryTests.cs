@@ -23,14 +23,14 @@ public sealed class DiscoveryTests
     }
 
     [HttpService("/api/test")]
-    private sealed class TestService
+    public sealed class TestService
     {
         [HttpGet("/{id}")]
         public string Get([FromRoute] int id) => id.ToString();
     }
 
     [HttpService("/api/duplicate")]
-    private sealed class DuplicateService
+    public sealed class DuplicateService
     {
         [HttpGet]
         public string A() => "a";
