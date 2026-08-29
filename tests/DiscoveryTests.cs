@@ -33,9 +33,9 @@ public sealed class DiscoveryTests
     private sealed class DuplicateService
     {
         [HttpGet]
-        public static string A() => "a";
+        public string A() => "a";
 
         [HttpGet]
-        public static string B() => "b";
+        public string B() => "b";
     }
 }
