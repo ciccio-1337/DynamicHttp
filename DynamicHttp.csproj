@@ -8,7 +8,7 @@
     <Version>1.0.0</Version>
     <Authors>Francesco Guagnano</Authors>
     <Description>Attribute-driven HTTP layer for ASP.NET Core Minimal APIs with startup discovery, compiled invokers, authorization, ProblemDetails and logging.</Description>
-    <PackageTags>aspnetcore;minimal-api;http;attributes;openapi;problem-details;validation</PackageTags>
+    <PackageTags>aspnetcore;minimal-api;http;attributes;openapi;problem-details</PackageTags>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
 
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -18,10 +18,10 @@
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
 
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <RepositoryUrl>https://github.com/your-org/DynamicHttp</RepositoryUrl>
+    <RepositoryUrl>https://github.com/ciccio-1337/DynamicHttp</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/your-org/DynamicHttp</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/ciccio-1337/DynamicHttp</PackageProjectUrl>
   </PropertyGroup>
 
   <ItemGroup>
