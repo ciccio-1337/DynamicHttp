@@ -65,9 +65,3 @@ public sealed class ProducesResponseTypeAttribute(int statusCode, Type? response
     public int StatusCode { get; } = statusCode;
     public Type? ResponseType { get; } = responseType;
 }
-
-[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = true, Inherited = true)]
-public sealed class UseFilterAttribute(Type filterType) : Attribute
-{
-    public Type FilterType { get; } = filterType;
-}
