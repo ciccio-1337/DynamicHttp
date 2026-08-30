@@ -5,9 +5,6 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDynamicHttp(options =>
 {
     options.ScanAssemblies(typeof(Sample.UserService).Assembly);
-
-    options.OpenApi.Enabled = true;
-    options.OpenApi.Provider = new AspNetCoreOpenApiProvider();
 });
 builder.Services.AddAuthentication();
 builder.Services.AddAuthorizationBuilder().AddPolicy("users.read", policy => policy.RequireClaim("users.read", ["true"]));
