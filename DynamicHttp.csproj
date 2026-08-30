@@ -6,9 +6,8 @@
 
     <PackageId>DynamicHttp</PackageId>
     <Version>1.0.0</Version>
-    <Authors>DynamicHttp</Authors>
-    <Company>DynamicHttp</Company>
-    <Description>Attribute-driven HTTP layer for ASP.NET Core Minimal APIs with startup discovery, compiled invokers, validation, authorization, ProblemDetails, logging and pluggable OpenAPI providers.</Description>
+    <Authors>Francesco Guagnano</Authors>
+    <Description>Attribute-driven HTTP layer for ASP.NET Core Minimal APIs with startup discovery, compiled invokers, authorization, ProblemDetails and logging.</Description>
     <PackageTags>aspnetcore;minimal-api;http;attributes;openapi;problem-details;validation</PackageTags>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
 
