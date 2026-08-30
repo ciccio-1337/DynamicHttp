@@ -21,6 +21,5 @@ public sealed record EndpointDefinition(Type ServiceType,
     bool AllowAnonymous,
     IReadOnlyList<DynamicAuthorizeAttribute> Authorization,
     IReadOnlyList<ProducesResponseTypeAttribute> Responses,
-    IReadOnlyList<Type> Filters,
     string[] Tags,
     string? GroupName);
