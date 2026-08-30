@@ -13,7 +13,6 @@ It integrates with ASP.NET Core instead of replacing it:
 - authentication/authorization
 - ProblemDetails
 - endpoint metadata
-- OpenAPI tooling
 - logging
 
 ## Example
@@ -21,18 +20,17 @@ It integrates with ASP.NET Core instead of replacing it:
 ```csharp
 builder.Services.AddDynamicHttp(options =>
 {
-    options.ScanAssemblies(typeof(UserService).Assembly);
-    options.OpenApi.Enabled = true;
+options.ScanAssemblies(typeof(UserService).Assembly);
 });
+builder.Services.AddAuthentication();
+builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
 app.UseDynamicHttpExceptionHandling();
 app.UseAuthentication();
 app.UseAuthorization();
-
 app.MapDynamicHttp();
-
 app.Run();
 ```
 
@@ -66,24 +64,6 @@ public sealed class UserService
     public string Public() => "hello";
 }
 ```
-
-## OpenAPI
-
-DynamicHttp exposes an OpenAPI provider abstraction. The core package does not force a specific OpenAPI implementation.
-
-```csharp
-builder.Services.AddDynamicHttp(options =>
-{
-    options.OpenApi.Enabled = true;
-    options.OpenApi.Provider = new AspNetCoreOpenApiProvider();
-});
-```
-
-A custom provider can consume the immutable startup endpoint model.
-
-## Validation
-
-Register an implementation of `IDynamicHttpValidator` or an adapter for the validation library used by your application.
 
 ## Exceptions
 
