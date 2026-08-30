@@ -7,7 +7,6 @@ public sealed class DynamicHttpOptions
 {
     internal List<Assembly> Assemblies { get; } = [];
 
-    public bool ValidateOnStartup { get; set; } = true;
     public ServiceLifetime DefaultServiceLifetime { get; set; } = ServiceLifetime.Scoped;
 
     public void ScanAssemblies(params Assembly[] assemblies)
