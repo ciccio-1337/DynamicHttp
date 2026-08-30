@@ -9,7 +9,6 @@ public sealed class DynamicHttpOptions
 
     public bool ValidateOnStartup { get; set; } = true;
     public ServiceLifetime DefaultServiceLifetime { get; set; } = ServiceLifetime.Scoped;
-    public DynamicHttpOpenApiOptions OpenApi { get; } = new();
 
     public void ScanAssemblies(params Assembly[] assemblies)
     {
@@ -20,12 +19,6 @@ public sealed class DynamicHttpOptions
     }
 
     public void ScanCallingAssembly() => ScanAssemblies(Assembly.GetCallingAssembly());
-}
-
-public sealed class DynamicHttpOpenApiOptions
-{
-    public bool Enabled { get; set; } = true;
-    public IDynamicHttpOpenApiProvider? Provider { get; set; }
 }
 
 public static class DynamicHttpServiceCollectionExtensions
@@ -43,7 +36,6 @@ public static class DynamicHttpServiceCollectionExtensions
 
         services.AddSingleton(options);
         services.AddSingleton<DynamicHttpRegistry>();
-        services.AddSingleton<IDynamicHttpValidator, NoOpValidator>();
 
         foreach (var assembly in options.Assemblies.Distinct())
         {
