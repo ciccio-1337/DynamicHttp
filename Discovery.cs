@@ -47,10 +47,6 @@ internal static partial class DynamicHttpDiscovery
                     var responses = serviceType.GetCustomAttributes<ProducesResponseTypeAttribute>(true)
                         .Concat(method.GetCustomAttributes<ProducesResponseTypeAttribute>(true))
                         .ToArray();
-                    var filters = serviceType.GetCustomAttributes<UseFilterAttribute>(true)
-                        .Concat(method.GetCustomAttributes<UseFilterAttribute>(true))
-                        .Select(x => x.FilterType)
-                        .ToArray();
 
                     result.Add(new EndpointDefinition(serviceType,
                         method,
@@ -62,7 +58,6 @@ internal static partial class DynamicHttpDiscovery
                         method.IsDefined(typeof(DynamicAllowAnonymousAttribute), true),
                         authorization,
                         responses,
-                        filters,
                         [.. service.Tags.Concat(http.Tags).Distinct()],
                         service.GroupName));
                 }
