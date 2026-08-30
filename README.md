@@ -20,7 +20,7 @@ It integrates with ASP.NET Core instead of replacing it:
 ```csharp
 builder.Services.AddDynamicHttp(options =>
 {
-options.ScanAssemblies(typeof(UserService).Assembly);
+    options.ScanAssemblies(typeof(UserService).Assembly);
 });
 builder.Services.AddAuthentication();
 builder.Services.AddAuthorization();
