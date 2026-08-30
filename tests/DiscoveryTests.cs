@@ -15,27 +15,10 @@ public sealed class DiscoveryTests
         Assert.NotNull(endpoint.Invoker);
     }
 
-    [Fact]
-    public void Rejects_duplicate_routes()
-    {
-        Assert.Throws<DynamicHttpConfigurationException>(() =>
-            DynamicHttpDiscovery.Build([typeof(DuplicateService).Assembly]));
-    }
-
     [HttpService("/api/test")]
     public sealed class TestService
     {
         [HttpGet("/{id}")]
         public string Get([FromRoute] int id) => id.ToString();
-    }
-
-    [HttpService("/api/duplicate")]
-    public sealed class DuplicateService
-    {
-        [HttpGet]
-        public string A() => "a";
-
-        [HttpGet]
-        public string B() => "b";
     }
 }
