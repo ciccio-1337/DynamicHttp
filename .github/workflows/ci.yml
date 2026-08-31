@@ -15,4 +15,3 @@ jobs:
       - run: dotnet restore
       - run: dotnet build --configuration Release --no-restore
       - run: dotnet test --configuration Release --no-build
-      - run: dotnet pack --configuration Release --no-build --output ./artifacts
