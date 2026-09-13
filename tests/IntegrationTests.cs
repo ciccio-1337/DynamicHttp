@@ -306,6 +306,30 @@ public sealed class IntegrationTests
     }
 
     [Fact]
+    public async Task Value_type_return_is_serialized()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/int");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("42", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Value_type_task_return_is_serialized()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/taskint/7");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("7", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Catch_all_route_binds_entire_remaining_path()
     {
         await using WebApplication app = await StartAppAsync();
@@ -398,6 +422,12 @@ public sealed class ValuesService
 
     [HttpGet("/catch/{*path}")]
     public string CatchAll([FromRoute] string path) => path;
+
+    [HttpGet("/int")]
+    public int Int() => 42;
+
+    [HttpGet("/taskint/{id}")]
+    public Task<int> TaskInt([FromRoute] int id) => Task.FromResult(id);
 }
 
 public enum Color { Red, Green, Blue }
