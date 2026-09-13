@@ -10,6 +10,7 @@ internal static partial class DynamicHttpDiscovery
         // GetTypes() throws ReflectionTypeLoadException when some types can't be loaded (e.g.
         // missing dependencies). Load whatever is loadable instead of failing the whole scan.
         Type[] types;
+        
         try
         {
             types = assembly.GetTypes();
