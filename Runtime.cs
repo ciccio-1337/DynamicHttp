@@ -62,10 +62,17 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
                     }
                     catch (Exception exception)
                     {
-                        logger.LogError(exception,
-                            "DynamicHttp invocation failed for {Service}.{Method}",
-                            definition.ServiceType.Name,
-                            definition.Method.Name);
+                        // Controlled HTTP exceptions (400, 404, …) are intentionally
+                        // thrown by the service; they will be logged by the exception
+                        // handler at the appropriate level. Log only unexpected errors
+                        // here to avoid double-logging at the wrong severity.
+                        if (exception is not IHttpException)
+                        {
+                            logger.LogError(exception,
+                                "DynamicHttp invocation failed for {Service}.{Method}",
+                                definition.ServiceType.Name,
+                                definition.Method.Name);
+                        }
 
                         throw;
                     }
