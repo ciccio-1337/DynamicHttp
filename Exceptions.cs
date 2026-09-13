@@ -16,16 +16,22 @@ public interface IHttpException
     string? Type { get; }
 }
 
-public class NotFoundHttpException(string detail) : Exception(detail), IHttpException
+public class NotFoundHttpException : Exception, IHttpException
 {
+    public NotFoundHttpException(string detail) : base(detail) { }
+    public NotFoundHttpException(string detail, Exception innerException) : base(detail, innerException) { }
+
     public int StatusCode => StatusCodes.Status404NotFound;
     public string Title => "Resource not found";
     public string? Detail => Message;
     public string? Type => "https://httpstatuses.com/404";
 }
 
-public class BadRequestHttpException(string detail) : Exception(detail), IHttpException
+public class BadRequestHttpException : Exception, IHttpException
 {
+    public BadRequestHttpException(string detail) : base(detail) { }
+    public BadRequestHttpException(string detail, Exception innerException) : base(detail, innerException) { }
+
     public int StatusCode => StatusCodes.Status400BadRequest;
     public string Title => "Bad request";
     public string? Detail => Message;
@@ -42,18 +48,29 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
         }
         catch (Exception exception)
         {
-            logger.LogError(exception,
-                "Unhandled DynamicHttp exception for {Method} {Path}. TraceId: {TraceId}",
-                context.Request.Method,
-                context.Request.Path,
-                context.TraceIdentifier);
+            IHttpException? typed = exception as IHttpException;
+
+            if (typed is not null)
+            {
+                logger.LogInformation(exception,
+                    "DynamicHttp request failed for {Method} {Path} with status code {StatusCode}",
+                    context.Request.Method,
+                    context.Request.Path,
+                    typed.StatusCode);
+            }
+            else
+            {
+                logger.LogError(exception,
+                    "Unhandled DynamicHttp exception for {Method} {Path}. TraceId: {TraceId}",
+                    context.Request.Method,
+                    context.Request.Path,
+                    context.TraceIdentifier);
+            }
 
             if (context.Response.HasStarted)
             {
                 throw;
             }
-
-            IHttpException? typed = exception as IHttpException;
 
             await Results.Problem(statusCode: typed?.StatusCode ?? StatusCodes.Status500InternalServerError,
                 title: typed?.Title ?? "An unexpected error occurred.",

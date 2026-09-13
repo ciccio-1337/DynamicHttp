@@ -17,7 +17,11 @@ internal static class CompiledInvokerFactory
                 Expression.Constant(index)),
                 parameter.ParameterType)).ToArray();
         var call = Expression.Call(typedService, method, callArguments);
-        var body = Expression.Convert(call, typeof(object));
+
+        // A void method cannot be converted to object; invoke it as a statement and return null.
+        Expression body = method.ReturnType == typeof(void)
+            ? Expression.Block(call, Expression.Constant(null, typeof(object)))
+            : Expression.Convert(call, typeof(object));
 
         return Expression.Lambda<Func<object, object?[], object?>>(body, service, args).Compile();
     }

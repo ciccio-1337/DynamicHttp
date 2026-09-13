@@ -47,6 +47,10 @@ internal static partial class DynamicHttpDiscovery
                     var responses = serviceType.GetCustomAttributes<ProducesResponseTypeAttribute>(true)
                         .Concat(method.GetCustomAttributes<ProducesResponseTypeAttribute>(true))
                         .ToArray();
+                    bool allowAnonymous = serviceType.IsDefined(typeof(DynamicAllowAnonymousAttribute), true) ||
+                        method.IsDefined(typeof(DynamicAllowAnonymousAttribute), true);
+
+                    ValidateAuthorization(serviceType, method);
 
                     result.Add(new EndpointDefinition(serviceType,
                         method,
@@ -54,8 +58,7 @@ internal static partial class DynamicHttpDiscovery
                         GetVerb(http),
                         parameters,
                         CompiledInvokerFactory.Create(serviceType, method, parameters),
-                        serviceType.IsDefined(typeof(DynamicAllowAnonymousAttribute), true) ||
-                        method.IsDefined(typeof(DynamicAllowAnonymousAttribute), true),
+                        allowAnonymous,
                         authorization,
                         responses,
                         [.. service.Tags.Concat(http.Tags).Distinct()],
@@ -72,16 +75,18 @@ internal static partial class DynamicHttpDiscovery
     private static ParameterDefinition[] BuildParameters(MethodInfo method) =>
         [.. method.GetParameters().Select(p =>
     {
-        if (p.ParameterType == typeof(CancellationToken))
+        var attribute = p.GetCustomAttributes().FirstOrDefault(a => a is FromRouteAttribute or
+            FromQueryAttribute or FromHeaderAttribute or FromBodyAttribute or FromServicesAttribute);
+
+        // Auto-detect CancellationToken only when no binding attribute is present; an explicit
+        // attribute always wins.
+        if (attribute is null && p.ParameterType == typeof(CancellationToken))
         {
             return new ParameterDefinition(p,
                 BindingKind.CancellationToken,
                 p.Name ?? "cancellationToken",
                 p.ParameterType);
         }
-
-        var attribute = p.GetCustomAttributes().FirstOrDefault(a => a is FromRouteAttribute or
-            FromQueryAttribute or FromHeaderAttribute or FromBodyAttribute or FromServicesAttribute);
 
         return attribute switch
         {
@@ -101,7 +106,29 @@ internal static partial class DynamicHttpDiscovery
 
         return type.IsPrimitive || type.IsEnum || type == typeof(string) ||
             type == typeof(Guid) || type == typeof(DateTime) ||
-            type == typeof(DateTimeOffset) || type == typeof(decimal);
+            type == typeof(DateTimeOffset) || type == typeof(TimeSpan) ||
+            type == typeof(DateOnly) || type == typeof(TimeOnly) ||
+            type == typeof(decimal);
+    }
+
+    internal static void ValidateAuthorization(Type serviceType, MethodInfo method)
+    {
+        bool classAnonymous = serviceType.IsDefined(typeof(DynamicAllowAnonymousAttribute), true);
+        bool methodAnonymous = method.IsDefined(typeof(DynamicAllowAnonymousAttribute), true);
+        bool classAuthorized = serviceType.IsDefined(typeof(DynamicAuthorizeAttribute), true);
+        bool methodAuthorized = method.IsDefined(typeof(DynamicAuthorizeAttribute), true);
+
+        if (classAuthorized && classAnonymous)
+        {
+            throw Configuration(serviceType, method,
+                "A service cannot combine [DynamicAuthorize] and [DynamicAllowAnonymous] on the same class.");
+        }
+
+        if (methodAuthorized && (classAnonymous || methodAnonymous))
+        {
+            throw Configuration(serviceType, method,
+                "An endpoint that requires [DynamicAuthorize] cannot also be [DynamicAllowAnonymous]: 'AllowAnonymous' would silently bypass authorization.");
+        }
     }
 
     private static string CombineRoutes(string prefix, string template)

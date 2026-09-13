@@ -1,5 +1,7 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -139,21 +141,52 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
         {
             BindingKind.CancellationToken => context.RequestAborted,
             BindingKind.Services => context.RequestServices.GetRequiredService(definition.ParameterType),
-            BindingKind.Route => ConvertValue(context.Request.RouteValues[definition.Name], definition.ParameterType),
-            BindingKind.Query => ConvertValue(context.Request.Query[definition.Name].FirstOrDefault(), definition.ParameterType),
-            BindingKind.Header => ConvertValue(context.Request.Headers[definition.Name].FirstOrDefault(), definition.ParameterType),
-            BindingKind.Body => await context.Request.ReadFromJsonAsync(definition.ParameterType, context.RequestAborted),
+            BindingKind.Route => ConvertValue(context.Request.RouteValues[definition.Name], definition),
+            BindingKind.Query => ConvertValue(context.Request.Query[definition.Name].FirstOrDefault(), definition),
+            BindingKind.Header => ConvertValue(context.Request.Headers[definition.Name].FirstOrDefault(), definition),
+            BindingKind.Body => await BindBodyAsync(context, definition),
             _ => throw new ArgumentOutOfRangeException(nameof(definition))
         };
     }
 
-    private static object? ConvertValue(object? value, Type type)
+    private static async ValueTask<object?> BindBodyAsync(HttpContext context, ParameterDefinition definition)
     {
+        if (!context.Request.HasJsonContentType())
+        {
+            throw new BadRequestHttpException($"Parameter '{definition.Name}' requires a 'application/json' request body.");
+        }
+
+        try
+        {
+            object? body = await context.Request.ReadFromJsonAsync(definition.ParameterType, context.RequestAborted);
+
+            if (body is null)
+            {
+                throw new BadRequestHttpException($"Parameter '{definition.Name}' requires a non-empty request body.");
+            }
+
+            return body;
+        }
+        catch (JsonException)
+        {
+            throw new BadRequestHttpException($"Parameter '{definition.Name}' could not be deserialized: the request body is not valid JSON.");
+        }
+    }
+
+    private static object? ConvertValue(object? value, ParameterDefinition definition)
+    {
+        Type type = definition.ParameterType;
+
         if (value is null)
         {
             if (type.IsValueType && Nullable.GetUnderlyingType(type) is null)
             {
-                return Activator.CreateInstance(type);
+                if (definition.Parameter.HasDefaultValue)
+                {
+                    return definition.Parameter.DefaultValue;
+                }
+
+                throw new BadRequestHttpException($"A value for parameter '{definition.Name}' is required.");
             }
 
             return null;
@@ -168,16 +201,77 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
 
         if (target.IsEnum)
         {
-            return Enum.Parse(target, value.ToString()!, true);
+            try
+            {
+                return Enum.Parse(target, value.ToString()!, ignoreCase: true);
+            }
+            catch (ArgumentException exception)
+            {
+                throw InvalidValue(definition, value, exception);
+            }
         }
 
         if (target == typeof(Guid))
         {
-            return Guid.Parse(value.ToString()!);
+            try
+            {
+                return Guid.Parse(value.ToString()!);
+            }
+            catch (FormatException exception)
+            {
+                throw InvalidValue(definition, value, exception);
+            }
         }
 
-        return Convert.ChangeType(value, target, CultureInfo.InvariantCulture);
+        try
+        {
+            return Convert.ChangeType(value, target, CultureInfo.InvariantCulture);
+        }
+        catch (Exception exception) when (exception is FormatException or InvalidCastException or OverflowException)
+        {
+            if (TryConvertWithTypeConverter(value, target, out object? converted))
+            {
+                return converted;
+            }
+
+            throw InvalidValue(definition, value, exception);
+        }
     }
+
+    private static bool TryConvertWithTypeConverter(object value, Type target, out object? converted)
+    {
+        converted = null;
+
+        TypeConverter converter;
+
+        try
+        {
+            converter = TypeDescriptor.GetConverter(target);
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
+
+        if (!converter.CanConvertFrom(typeof(string)))
+        {
+            return false;
+        }
+
+        try
+        {
+            converted = converter.ConvertFromInvariantString(value.ToString()!);
+            
+            return true;
+        }
+        catch (Exception exception) when (exception is FormatException or NotSupportedException or ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static BadRequestHttpException InvalidValue(ParameterDefinition definition, object value, Exception innerException) =>
+        new($"The value '{value}' for parameter '{definition.Name}' is not valid.", innerException);
 
     private static async ValueTask<object?> AwaitAsync(object? value)
     {
@@ -190,7 +284,7 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
         {
             await task.ConfigureAwait(false);
 
-            return task.GetType().GetProperty("Result")?.GetValue(task);
+            return GetTaskResult(task);
         }
 
         if (value is ValueTask valueTask)
@@ -200,6 +294,28 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
             return null;
         }
 
+        if (value.GetType() is { IsGenericType: true } valueType &&
+            valueType.GetGenericTypeDefinition() == typeof(ValueTask<>))
+        {
+            // A boxed ValueTask<T> is never `is ValueTask`, so the generic case must be handled
+            // explicitly by awaiting AsTask() and reading Result.
+            if (valueType.GetMethod(nameof(ValueTask<int>.AsTask))?.Invoke(value, null) is Task genericTask)
+            {
+                await genericTask.ConfigureAwait(false);
+            }
+
+            return valueType.GetProperty(nameof(ValueTask<int>.Result))?.GetValue(value);
+        }
+
         return value;
+    }
+
+    private static object? GetTaskResult(Task task)
+    {
+        Type type = task.GetType();
+
+        return type.IsGenericType
+            ? type.GetProperty(nameof(Task<int>.Result))?.GetValue(task)
+            : null;
     }
 }
