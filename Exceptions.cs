@@ -48,6 +48,12 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
         }
         catch (Exception exception)
         {
+            if (exception is OperationCanceledException && context.RequestAborted.IsCancellationRequested)
+            {
+                // The client went away; there is nothing meaningful to respond or log as an error.
+                throw;
+            }
+
             IHttpException? typed = exception as IHttpException;
 
             if (typed is not null)

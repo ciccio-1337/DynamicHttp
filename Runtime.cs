@@ -179,13 +179,15 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
 
         if (value is null)
         {
+            if (definition.Parameter.HasDefaultValue && definition.Parameter.DefaultValue is not DBNull)
+            {
+                // A declared default is honored for every binding kind: non-nullable value
+                // types, nullable value types and reference types alike.
+                return definition.Parameter.DefaultValue;
+            }
+
             if (type.IsValueType && Nullable.GetUnderlyingType(type) is null)
             {
-                if (definition.Parameter.HasDefaultValue)
-                {
-                    return definition.Parameter.DefaultValue;
-                }
-
                 throw new BadRequestHttpException($"A value for parameter '{definition.Name}' is required.");
             }
 

@@ -40,7 +40,7 @@ app.Run();
 public sealed class UserService
 {
     [HttpGet("/{id}")]
-    [ProducesResponseType<UserDto>(200)]
+    [ProducesResponseType(200, typeof(UserDto))]
     [ProducesResponseType(404)]
     public async Task<UserDto> Get(
         [FromRoute] int id,

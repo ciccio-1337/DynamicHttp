@@ -1,3 +1,4 @@
+using DynamicHttp.Tests.Fixtures;
 using Xunit;
 
 namespace DynamicHttp.Tests;
@@ -12,6 +13,16 @@ public sealed class DiscoveryTests
 
         Assert.Equal("/api/test/{id}", endpoint.Route);
         Assert.Equal("GET", endpoint.HttpMethod);
+        Assert.NotNull(endpoint.Invoker);
+    }
+
+    [Fact]
+    public void Catch_all_route_parameter_binds_to_route_name_without_star()
+    {
+        var endpoints = DynamicHttpDiscovery.Build([typeof(CatchAllService).Assembly]);
+        var endpoint = Assert.Single(endpoints, x => x.ServiceType == typeof(CatchAllService));
+
+        Assert.Equal("/api/catch/{*path}", endpoint.Route);
         Assert.NotNull(endpoint.Invoker);
     }
 
@@ -58,6 +69,17 @@ public sealed class DiscoveryTests
         DynamicHttpDiscovery.ValidateAuthorization(typeof(AuthorizedClass), method);
     }
 
+    [Fact]
+    public void By_ref_parameter_throws_configuration_error()
+    {
+        // The bad service lives in a dedicated fixture assembly so scanning it cannot
+        // affect any other test that builds over the main test assembly.
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.Build([typeof(RefParameterService).Assembly]));
+
+        Assert.Contains("ref", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [HttpService("/api/test")]
     public sealed class TestService
     {
@@ -97,5 +119,12 @@ public sealed class DiscoveryTests
     private sealed class AuthorizedClass
     {
         public string Get() => "x";
+    }
+
+    [HttpService("/api/catch")]
+    private sealed class CatchAllService
+    {
+        [HttpGet("/{*path}")]
+        public string Get([FromRoute] string path) => path;
     }
 }

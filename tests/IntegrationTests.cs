@@ -197,6 +197,22 @@ public sealed class IntegrationTests
     }
 
     [Fact]
+    public async Task Query_endpoint_uses_declared_defaults_for_reference_and_nullable()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var allMissing = await client.GetAsync("/api/values/mixeddefaults");
+        Assert.Equal("\"fast|5\"", await allMissing.Content.ReadAsStringAsync());
+
+        var oneMissing = await client.GetAsync("/api/values/mixeddefaults?mode=slow");
+        Assert.Equal("\"slow|5\"", await oneMissing.Content.ReadAsStringAsync());
+
+        var allPresent = await client.GetAsync("/api/values/mixeddefaults?mode=slow&count=9");
+        Assert.Equal("\"slow|9\"", await allPresent.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Header_endpoint_reads_named_header()
     {
         await using WebApplication app = await StartAppAsync();
@@ -288,6 +304,38 @@ public sealed class IntegrationTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("\"ok\"", await response.Content.ReadAsStringAsync());
     }
+
+    [Fact]
+    public async Task Catch_all_route_binds_entire_remaining_path()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/catch/a/b/c");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("\"a/b/c\"", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task AddDynamicHttp_without_options_scans_calling_assembly()
+    {
+        // No configure callback: the fallback must scan the assembly that called AddDynamicHttp
+        // (this test assembly) and register ValuesService from it.
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddDynamicHttp();
+        WebApplication app = builder.Build();
+        app.UseDynamicHttpExceptionHandling();
+        app.MapDynamicHttp();
+        await app.StartAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/plain");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("\"plain\"", await response.Content.ReadAsStringAsync());
+    }
 }
 
 [HttpService("/api/values")]
@@ -320,6 +368,9 @@ public sealed class ValuesService
     [HttpGet("/defaults")]
     public string Defaults([FromQuery] int page = 10) => page.ToString();
 
+    [HttpGet("/mixeddefaults")]
+    public string MixedDefaults([FromQuery] string mode = "fast", [FromQuery] int? count = 5) => $"{mode}|{count}";
+
     [HttpGet("/header")]
     public string Header([FromHeader("X-Trace")] string trace) => trace;
 
@@ -344,6 +395,9 @@ public sealed class ValuesService
         await Task.Delay(1, cancellationToken);
         return "ok";
     }
+
+    [HttpGet("/catch/{*path}")]
+    public string CatchAll([FromRoute] string path) => path;
 }
 
 public enum Color { Red, Green, Blue }

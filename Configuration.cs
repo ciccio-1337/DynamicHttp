@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace DynamicHttp;
@@ -22,6 +23,7 @@ public sealed class DynamicHttpOptions
 
 public static class DynamicHttpServiceCollectionExtensions
 {
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public static IServiceCollection AddDynamicHttp(this IServiceCollection services, Action<DynamicHttpOptions>? configure = null)
     {
         DynamicHttpOptions options = new();
@@ -30,7 +32,9 @@ public static class DynamicHttpServiceCollectionExtensions
 
         if (options.Assemblies.Count == 0)
         {
-            options.ScanCallingAssembly();
+            // GetCallingAssembly() here resolves to the assembly that invoked AddDynamicHttp
+            // (the consumer's app), not DynamicHttp itself. NoInlining keeps that frame intact.
+            options.ScanAssemblies(Assembly.GetCallingAssembly());
         }
 
         services.AddSingleton(options);

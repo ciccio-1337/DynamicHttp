@@ -5,9 +5,23 @@ namespace DynamicHttp;
 
 internal static partial class DynamicHttpDiscovery
 {
-    public static IReadOnlyList<Type> FindServices(Assembly assembly) =>
-        [.. assembly.GetTypes().Where(t => t is { IsClass: true, IsAbstract: false } &&
+    public static IReadOnlyList<Type> FindServices(Assembly assembly)
+    {
+        // GetTypes() throws ReflectionTypeLoadException when some types can't be loaded (e.g.
+        // missing dependencies). Load whatever is loadable instead of failing the whole scan.
+        Type[] types;
+        try
+        {
+            types = assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException exception)
+        {
+            types = exception.Types.Where(t => t is not null).ToArray()!;
+        }
+
+        return [.. types.Where(t => t is { IsClass: true, IsAbstract: false } &&
             t.GetCustomAttribute<HttpServiceAttribute>() is not null)];
+    }
 
     public static IReadOnlyList<EndpointDefinition> Build(IEnumerable<Assembly> assemblies)
     {
@@ -152,7 +166,7 @@ internal static partial class DynamicHttpDiscovery
         _ => throw new DynamicHttpConfigurationException($"Unsupported HTTP attribute '{attribute.GetType().Name}'.")
     };
 
-    [GeneratedRegex(@"\{([^}:?]+)")]
+    [GeneratedRegex(@"\{\*?([^}:?*\s]+)")]
     private static partial Regex RouteParameterRegex();
 
     private static void ValidateParameters(string route,
@@ -170,6 +184,11 @@ internal static partial class DynamicHttpDiscovery
             {
                 throw Configuration(service, method, $"Route '{route}' has no parameter named '{parameter.Name}'.");
             }
+        }
+
+        foreach (var parameter in parameters.Where(x => x.Parameter.ParameterType.IsByRef))
+        {
+            throw Configuration(service, method, $"Parameter '{parameter.Name}' cannot be bound: 'ref'/'out'/'in' parameters are not supported.");
         }
 
         int bodyCount = parameters.Count(x => x.Kind == BindingKind.Body);
