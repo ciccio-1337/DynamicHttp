@@ -1,27 +1,46 @@
 using System.Reflection;
-using System.Text.RegularExpressions;
+using System.Security.Claims;
+using System.Text;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing.Patterns;
 
 namespace DynamicHttp;
 
-internal static partial class DynamicHttpDiscovery
+internal static class DynamicHttpDiscovery
 {
     public static IReadOnlyList<Type> FindServices(Assembly assembly)
     {
         // GetTypes() throws ReflectionTypeLoadException when some types can't be loaded (e.g.
         // missing dependencies). Load whatever is loadable instead of failing the whole scan.
         Type[] types;
-        
+
         try
         {
             types = assembly.GetTypes();
         }
         catch (ReflectionTypeLoadException exception)
         {
-            types = exception.Types.Where(t => t is not null).ToArray()!;
+            types = exception.Types.OfType<Type>().ToArray();
         }
 
-        return [.. types.Where(t => t is { IsClass: true, IsAbstract: false } &&
+        Type[] services = [.. types.Where(t => t is { IsClass: true, IsAbstract: false } &&
             t.GetCustomAttribute<HttpServiceAttribute>() is not null)];
+
+        foreach (Type service in services)
+        {
+            ValidateServiceType(service);
+        }
+
+        return services;
+    }
+
+    internal static void ValidateServiceType(Type serviceType)
+    {
+        if (serviceType.IsGenericTypeDefinition)
+        {
+            throw new DynamicHttpConfigurationException(
+                $"DynamicHttp configuration error for '{serviceType.FullName}': open generic services are not supported.");
+        }
     }
 
     public static IReadOnlyList<EndpointDefinition> Build(IEnumerable<Assembly> assemblies)
@@ -34,25 +53,21 @@ internal static partial class DynamicHttpDiscovery
             {
                 var service = serviceType.GetCustomAttribute<HttpServiceAttribute>()!;
 
-                foreach (var method in serviceType.GetMethods(BindingFlags.Instance | BindingFlags.Public))
+                foreach (var method in serviceType.GetMethods(
+                    BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public))
                 {
-                    var httpAttributes = method.GetCustomAttributes<HttpMethodAttribute>(true).ToArray();
+                    var http = GetHttpAttribute(serviceType, method);
 
-                    if (httpAttributes.Length == 0)
+                    if (http is null)
                     {
                         continue;
                     }
 
-                    if (httpAttributes.Length > 1)
-                    {
-                        throw Configuration(serviceType, method, "A method can have only one HTTP method attribute.");
-                    }
-
-                    var http = httpAttributes[0];
+                    ValidateEndpointMethod(serviceType, method);
 
                     string route = CombineRoutes(service.RoutePrefix, http.Template);
 
-                    var parameters = BuildParameters(method);
+                    var parameters = BuildParameters(serviceType, method);
 
                     ValidateParameters(route, parameters, serviceType, method);
 
@@ -87,33 +102,130 @@ internal static partial class DynamicHttpDiscovery
         return result;
     }
 
-    private static ParameterDefinition[] BuildParameters(MethodInfo method) =>
-        [.. method.GetParameters().Select(p =>
+    internal static HttpMethodAttribute? GetHttpAttribute(Type serviceType, MethodInfo method)
     {
-        var attribute = p.GetCustomAttributes().FirstOrDefault(a => a is FromRouteAttribute or
-            FromQueryAttribute or FromHeaderAttribute or FromBodyAttribute or FromServicesAttribute);
+        var httpAttributes = method.GetCustomAttributes<HttpMethodAttribute>(true).ToArray();
 
-        // Auto-detect CancellationToken only when no binding attribute is present; an explicit
-        // attribute always wins.
-        if (attribute is null && p.ParameterType == typeof(CancellationToken))
+        if (httpAttributes.Length == 0)
         {
-            return new ParameterDefinition(p,
-                BindingKind.CancellationToken,
-                p.Name ?? "cancellationToken",
-                p.ParameterType);
+            return null;
         }
 
-        return attribute switch
+        if (httpAttributes.Length > 1)
         {
-            FromRouteAttribute a => new ParameterDefinition(p, BindingKind.Route, a.Name ?? p.Name!, p.ParameterType),
-            FromQueryAttribute a => new ParameterDefinition(p, BindingKind.Query, a.Name ?? p.Name!, p.ParameterType),
-            FromHeaderAttribute a => new ParameterDefinition(p, BindingKind.Header, a.Name ?? p.Name!, p.ParameterType),
-            FromBodyAttribute => new ParameterDefinition(p, BindingKind.Body, p.Name!, p.ParameterType),
-            FromServicesAttribute => new ParameterDefinition(p, BindingKind.Services, p.Name!, p.ParameterType),
-            _ when IsSimple(p.ParameterType) => new ParameterDefinition(p, BindingKind.Query, p.Name!, p.ParameterType),
-            _ => new ParameterDefinition(p, BindingKind.Body, p.Name!, p.ParameterType)
+            throw Configuration(serviceType, method, "A method can have only one HTTP method attribute.");
+        }
+
+        return httpAttributes[0];
+    }
+
+    internal static void ValidateEndpointMethod(Type serviceType, MethodInfo method)
+    {
+        if (method.IsStatic)
+        {
+            throw Configuration(serviceType, method,
+                "Endpoint methods must be instance methods; static methods are not supported.");
+        }
+
+        if (method.IsGenericMethodDefinition)
+        {
+            throw Configuration(serviceType, method, "Generic endpoint methods are not supported.");
+        }
+    }
+
+    internal static ParameterDefinition[] BuildParameters(Type serviceType, MethodInfo method)
+    {
+        var nullability = new NullabilityInfoContext();
+
+        return [.. method.GetParameters().Select(p =>
+        {
+            var bindingAttributes = p.GetCustomAttributes()
+                .Where(a => a is FromRouteAttribute or FromQueryAttribute or FromHeaderAttribute or
+                    FromBodyAttribute or FromServicesAttribute)
+                .ToArray();
+
+            if (bindingAttributes.Length > 1)
+            {
+                throw Configuration(serviceType, method,
+                    $"Parameter '{p.Name}' has multiple binding attributes " +
+                    $"({string.Join(", ", bindingAttributes.Select(a => a.GetType().Name))}); use only one.");
+            }
+
+            var attribute = bindingAttributes.FirstOrDefault();
+
+            // Auto-detect framework types and CancellationToken only when no binding attribute is
+            // present; an explicit attribute always wins.
+            if (attribute is null)
+            {
+                if (p.ParameterType == typeof(CancellationToken))
+                {
+                    return CreateParameter(p,
+                        BindingKind.CancellationToken,
+                        p.Name ?? "cancellationToken",
+                        nullability);
+                }
+
+                if (p.ParameterType == typeof(HttpContext))
+                {
+                    return CreateParameter(p, BindingKind.HttpContext, p.Name!, nullability);
+                }
+
+                if (p.ParameterType == typeof(HttpRequest))
+                {
+                    return CreateParameter(p, BindingKind.HttpRequest, p.Name!, nullability);
+                }
+
+                if (p.ParameterType == typeof(HttpResponse))
+                {
+                    return CreateParameter(p, BindingKind.HttpResponse, p.Name!, nullability);
+                }
+
+                if (p.ParameterType == typeof(ClaimsPrincipal))
+                {
+                    return CreateParameter(p, BindingKind.User, p.Name!, nullability);
+                }
+            }
+
+            return attribute switch
+            {
+                FromRouteAttribute a => CreateParameter(p, BindingKind.Route, a.Name ?? p.Name!, nullability),
+                FromQueryAttribute a => CreateParameter(p, BindingKind.Query, a.Name ?? p.Name!, nullability),
+                FromHeaderAttribute a => CreateParameter(p, BindingKind.Header, a.Name ?? p.Name!, nullability),
+                FromBodyAttribute => CreateParameter(p, BindingKind.Body, p.Name!, nullability),
+                FromServicesAttribute => CreateParameter(p, BindingKind.Services, p.Name!, nullability),
+                _ when IsSimple(p.ParameterType) => CreateParameter(p, BindingKind.Query, p.Name!, nullability),
+                _ => CreateParameter(p, BindingKind.Body, p.Name!, nullability)
+            };
+        })];
+    }
+
+    private static ParameterDefinition CreateParameter(ParameterInfo parameter,
+        BindingKind kind,
+        string name,
+        NullabilityInfoContext nullability) =>
+        new(parameter, kind, name, parameter.ParameterType)
+        {
+            IsNullable = IsNullable(parameter, nullability)
         };
-    })];
+
+    private static bool IsNullable(ParameterInfo parameter, NullabilityInfoContext nullability)
+    {
+        Type type = parameter.ParameterType;
+
+        if (Nullable.GetUnderlyingType(type) is not null)
+        {
+            return true;
+        }
+
+        if (type.IsValueType)
+        {
+            return false;
+        }
+
+        // Unknown means the declaring assembly does not use nullable reference annotations;
+        // keep the historical (optional) behavior instead of enforcing a missing value.
+        return nullability.Create(parameter).ReadState != NullabilityState.NotNull;
+    }
 
     private static bool IsSimple(Type type)
     {
@@ -167,16 +279,13 @@ internal static partial class DynamicHttpDiscovery
         _ => throw new DynamicHttpConfigurationException($"Unsupported HTTP attribute '{attribute.GetType().Name}'.")
     };
 
-    [GeneratedRegex(@"\{\*?([^}:?*\s]+)")]
-    private static partial Regex RouteParameterRegex();
-
-    private static void ValidateParameters(string route,
+    internal static void ValidateParameters(string route,
         IReadOnlyList<ParameterDefinition> parameters,
         Type service,
         MethodInfo method)
     {
-        HashSet<string> routeNames = RouteParameterRegex().Matches(route)
-            .Select(x => x.Groups[1].Value)
+        HashSet<string> routeNames = RoutePatternFactory.Parse(route).Parameters
+            .Select(x => x.Name)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         foreach (var parameter in parameters.Where(x => x.Kind == BindingKind.Route))
@@ -200,16 +309,72 @@ internal static partial class DynamicHttpDiscovery
         }
     }
 
-    private static void ValidateConflicts(IEnumerable<EndpointDefinition> endpoints)
+    internal static void ValidateConflicts(IEnumerable<EndpointDefinition> endpoints)
     {
         var duplicate = endpoints
-            .GroupBy(x => $"{x.HttpMethod} {x.Route}", StringComparer.OrdinalIgnoreCase)
+            .GroupBy(x => $"{x.HttpMethod} {NormalizeRoute(x.Route)}", StringComparer.Ordinal)
             .FirstOrDefault(x => x.Count() > 1);
 
         if (duplicate is not null)
         {
-            throw new DynamicHttpConfigurationException($"Conflicting dynamic endpoints: {duplicate.Key}");
+            string routes = string.Join(", ", duplicate.Select(x => $"{x.HttpMethod} {x.Route}"));
+            throw new DynamicHttpConfigurationException($"Conflicting dynamic endpoints: {routes}");
         }
+    }
+
+    /// <summary>
+    /// Builds a canonical representation of a route template with parameter names removed.
+    /// Two templates that normalize to the same value have the same precedence and can both
+    /// match the same request, which makes ASP.NET Core throw at request time.
+    /// </summary>
+    internal static string NormalizeRoute(string route)
+    {
+        RoutePattern pattern = RoutePatternFactory.Parse(route);
+        StringBuilder builder = new();
+
+        foreach (RoutePatternPathSegment segment in pattern.PathSegments)
+        {
+            builder.Append('/');
+
+            foreach (RoutePatternPart part in segment.Parts)
+            {
+                switch (part)
+                {
+                    case RoutePatternLiteralPart literal:
+                        // Route matching is case-insensitive for literals, but route constraints
+                        // are not, so only literals are case-folded.
+                        builder.Append(literal.Content.ToUpperInvariant());
+                        break;
+                    case RoutePatternSeparatorPart separator:
+                        builder.Append(separator.Content);
+                        break;
+                    case RoutePatternParameterPart parameter:
+                        builder.Append('{');
+                        if (parameter.IsCatchAll)
+                        {
+                            builder.Append('*');
+                        }
+                        builder.Append('_');
+                        if (parameter.IsOptional)
+                        {
+                            builder.Append('?');
+                        }
+                        if (parameter.Default is not null)
+                        {
+                            builder.Append('=').Append(parameter.Default);
+                        }
+                        foreach (var policy in parameter.ParameterPolicies
+                            .OrderBy(p => p.Content, StringComparer.Ordinal))
+                        {
+                            builder.Append(':').Append(policy.Content);
+                        }
+                        builder.Append('}');
+                        break;
+                }
+            }
+        }
+
+        return builder.ToString();
     }
 
     private static DynamicHttpConfigurationException Configuration(Type service, MethodInfo method, string message) =>

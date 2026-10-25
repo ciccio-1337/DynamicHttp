@@ -19,7 +19,7 @@ public sealed class DevAuthHandler : AuthenticationHandler<AuthenticationSchemeO
     private const string HeaderName = "X-Dev-User";
     private const string PolicyClaimType = "users.read";
 
-    #pragma warning disable CS0618 // The current shared framework still only exposes the ISystemClock ctor.
+#pragma warning disable CS0618 // The current shared framework still only exposes the ISystemClock ctor.
     public DevAuthHandler(IOptionsMonitor<AuthenticationSchemeOptions> options,
         ILoggerFactory logger, UrlEncoder encoder, ISystemClock clock)
         : base(options, logger, encoder, clock)

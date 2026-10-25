@@ -16,30 +16,44 @@ public interface IHttpException
     string? Type { get; }
 }
 
-public class NotFoundHttpException : Exception, IHttpException
+/// <summary>
+/// Base class for exceptions that map to a controlled ProblemDetails response.
+/// </summary>
+public abstract class HttpException : Exception, IHttpException
+{
+    protected HttpException(string detail) : base(detail) { }
+    protected HttpException(string detail, Exception innerException) : base(detail, innerException) { }
+
+    public abstract int StatusCode { get; }
+    public abstract string Title { get; }
+    public string? Detail => Message;
+    public abstract string? Type { get; }
+}
+
+public class NotFoundHttpException : HttpException
 {
     public NotFoundHttpException(string detail) : base(detail) { }
     public NotFoundHttpException(string detail, Exception innerException) : base(detail, innerException) { }
 
-    public int StatusCode => StatusCodes.Status404NotFound;
-    public string Title => "Resource not found";
-    public string? Detail => Message;
-    public string? Type => "https://httpstatuses.com/404";
+    public override int StatusCode => StatusCodes.Status404NotFound;
+    public override string Title => "Resource not found";
+    public override string? Type => "https://httpstatuses.com/404";
 }
 
-public class BadRequestHttpException : Exception, IHttpException
+public class BadRequestHttpException : HttpException
 {
     public BadRequestHttpException(string detail) : base(detail) { }
     public BadRequestHttpException(string detail, Exception innerException) : base(detail, innerException) { }
 
-    public int StatusCode => StatusCodes.Status400BadRequest;
-    public string Title => "Bad request";
-    public string? Detail => Message;
-    public string? Type => "https://httpstatuses.com/400";
+    public override int StatusCode => StatusCodes.Status400BadRequest;
+    public override string Title => "Bad request";
+    public override string? Type => "https://httpstatuses.com/400";
 }
 
 public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<DynamicHttpExceptionHandler> logger)
 {
+    internal const string LoggedExceptionItemKey = "DynamicHttp.ExceptionLogged";
+
     public async Task InvokeAsync(HttpContext context)
     {
         try
@@ -64,8 +78,10 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
                     context.Request.Path,
                     typed.StatusCode);
             }
-            else
+            else if (!context.Items.ContainsKey(LoggedExceptionItemKey))
             {
+                // DynamicHttp endpoints log unexpected exceptions with service/method context;
+                // only log here when the exception did not come from a mapped endpoint.
                 logger.LogError(exception,
                     "Unhandled DynamicHttp exception for {Method} {Path}. TraceId: {TraceId}",
                     context.Request.Method,

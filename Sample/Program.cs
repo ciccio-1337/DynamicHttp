@@ -8,10 +8,19 @@ builder.Services.AddDynamicHttp(options =>
 });
 // Dev-only identity provider so the sample's [DynamicAuthorize] endpoints can be exercised
 // without a real IdP, e.g. `curl -H 'X-Dev-User: mario' ...`. Do not reuse in production.
-builder.Services
-    .AddAuthentication(Sample.DevAuthHandler.SchemeName)
-    .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, Sample.DevAuthHandler>(
-        Sample.DevAuthHandler.SchemeName, _ => { });
+if (builder.Environment.IsDevelopment())
+{
+    builder.Services
+        .AddAuthentication(Sample.DevAuthHandler.SchemeName)
+        .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, Sample.DevAuthHandler>(
+            Sample.DevAuthHandler.SchemeName, _ => { });
+}
+else
+{
+    // Register the authentication services without the development handler. A real deployment
+    // should configure its own default scheme here.
+    builder.Services.AddAuthentication();
+}
 builder.Services.AddAuthorizationBuilder().AddPolicy("users.read", policy => policy.RequireClaim("users.read", ["true"]));
 
 var app = builder.Build();

@@ -21,12 +21,16 @@ It integrates with ASP.NET Core instead of replacing it:
 builder.Services.AddDynamicHttp(options =>
 {
     options.ScanAssemblies(typeof(UserService).Assembly);
+    // Optional; defaults to ServiceLifetime.Scoped.
+    options.DefaultServiceLifetime = ServiceLifetime.Scoped;
 });
+// Configure at least one authentication scheme (for example JwtBearer) in a real app.
 builder.Services.AddAuthentication();
 builder.Services.AddAuthorization();
 
 var app = builder.Build();
 
+// Must be registered before authentication/authorization and before MapDynamicHttp.
 app.UseDynamicHttpExceptionHandling();
 app.UseAuthentication();
 app.UseAuthorization();
@@ -65,9 +69,51 @@ public sealed class UserService
 }
 ```
 
+## Binding
+
+DynamicHttp uses the ASP.NET Core source attributes:
+
+| Attribute | Source |
+| --- | --- |
+| `[FromRoute]` | Route values |
+| `[FromQuery]` | Query string (default for simple types) |
+| `[FromHeader]` | Request headers |
+| `[FromBody]` | JSON body (default for complex types) |
+| `[FromServices]` | Dependency injection |
+| `CancellationToken` | `HttpContext.RequestAborted` |
+| `HttpContext`, `HttpRequest`, `HttpResponse`, `ClaimsPrincipal` | Current request |
+
+Rules enforced at startup:
+
+- Only one binding attribute is allowed per parameter.
+- An endpoint can have at most one body parameter.
+- A `[FromRoute]` parameter must exist in the route template.
+- Endpoint methods must be instance methods and cannot be generic; services cannot be open generic types.
+- Two endpoints that normalize to the same route template (for example `/x/{id}` and `/x/{name}`) are rejected.
+
+Parameters are required unless they are nullable (`string?`, `int?`, `Dto?`) or have a C# default value. A missing required route, query or header value returns 400. `[FromBody]` requires `application/json`: an empty body returns 400, and a JSON `null` is accepted only for nullable parameters.
+
+## Return values
+
+Endpoints may return `T`, `Task`, `Task<T>`, `ValueTask`, `ValueTask<T>`, or `IResult` (including `Task<IResult>` and `ValueTask<IResult>`). Values that are not `IResult` are serialized as JSON with status 200; a `null` result produces an empty 200 response.
+
+## Authorization
+
+`[DynamicAuthorize]` accepts `Policy`, `Roles` and `AuthenticationSchemes`. All non-empty values are applied to the same endpoint, so `Policy` and `Roles` are enforced together.
+
+`[DynamicAllowAnonymous]` on a method overrides a class-level requirement (for example, a public endpoint inside an authorized service). Combining `[DynamicAuthorize]` and `[DynamicAllowAnonymous]` on the same class or method is a startup configuration error rather than silently disabling authorization.
+
 ## Exceptions
 
-Use `IHttpException` for exceptions that should become a controlled ProblemDetails response. Unknown exceptions are logged and returned as HTTP 500 without exposing implementation details.
+Register `UseDynamicHttpExceptionHandling()` in the pipeline; it converts exceptions into ProblemDetails responses:
+
+- `IHttpException` / `HttpException` (for example `BadRequestHttpException`, `NotFoundHttpException`) maps to its `StatusCode` and is logged at Information.
+- An unexpected exception returns a 500 ProblemDetails with a `traceId` and does not expose the exception message or stack trace. It is logged once at Error with the service/method context.
+- A cancellation caused by the client disconnecting (`RequestAborted`) is not logged as an error.
+
+## Registration
+
+`AddDynamicHttp` is idempotent: calling it more than once merges the scanned assemblies and registers each service once. Service descriptors created by the application (custom lifetime, factory or implementation) are left untouched. When no assembly is configured, `AddDynamicHttp` scans the calling assembly; `ScanCallingAssembly()` does the same explicitly.
 
 ## Notes
 

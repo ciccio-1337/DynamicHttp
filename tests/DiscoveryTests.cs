@@ -80,6 +80,134 @@ public sealed class DiscoveryTests
         Assert.Contains("ref", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Method_with_multiple_http_attributes_throws()
+    {
+        var method = typeof(MultipleHttpMethods).GetMethod(nameof(MultipleHttpMethods.Get))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.GetHttpAttribute(typeof(MultipleHttpMethods), method));
+
+        Assert.Contains("only one HTTP method attribute", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Static_endpoint_method_throws()
+    {
+        var method = typeof(StaticEndpoint).GetMethod(nameof(StaticEndpoint.Get))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateEndpointMethod(typeof(StaticEndpoint), method));
+
+        Assert.Contains("static", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Generic_endpoint_method_throws()
+    {
+        var method = typeof(GenericEndpoint).GetMethod(nameof(GenericEndpoint.Get))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateEndpointMethod(typeof(GenericEndpoint), method));
+
+        Assert.Contains("Generic", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Parameter_with_multiple_binding_attributes_throws()
+    {
+        var method = typeof(MultipleBindingAttributes).GetMethod(nameof(MultipleBindingAttributes.Get))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(MultipleBindingAttributes), method));
+
+        Assert.Contains("multiple binding attributes", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Route_parameter_not_in_template_throws()
+    {
+        var method = typeof(BadRouteParameter).GetMethod(nameof(BadRouteParameter.Get))!;
+        var parameters = DynamicHttpDiscovery.BuildParameters(typeof(BadRouteParameter), method);
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateParameters("/api/bad", parameters, typeof(BadRouteParameter), method));
+
+        Assert.Contains("no parameter named 'id'", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Multiple_body_parameters_throw()
+    {
+        var method = typeof(MultipleBodies).GetMethod(nameof(MultipleBodies.Get))!;
+        var parameters = DynamicHttpDiscovery.BuildParameters(typeof(MultipleBodies), method);
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateParameters("/api/bodies", parameters, typeof(MultipleBodies), method));
+
+        Assert.Contains("at most one body parameter", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Open_generic_service_throws()
+    {
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateServiceType(typeof(GenericService<>)));
+
+        Assert.Contains("generic", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Ambiguous_route_templates_conflict()
+    {
+        EndpointDefinition[] endpoints =
+        [
+            CreateEndpoint("/api/{id}"),
+            CreateEndpoint("/api/{name}")
+        ];
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateConflicts(endpoints));
+
+        Assert.Contains("/api/{id}", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("/api/{name}", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Constrained_routes_are_not_treated_as_conflicts()
+    {
+        EndpointDefinition[] endpoints =
+        [
+            CreateEndpoint("/api/{id}"),
+            CreateEndpoint("/api/{id:int}")
+        ];
+
+        DynamicHttpDiscovery.ValidateConflicts(endpoints);
+    }
+
+    [Fact]
+    public void Optional_and_constrained_route_parameters_are_accepted()
+    {
+        var endpoints = DynamicHttpDiscovery.Build([typeof(RouteTemplateService).Assembly]);
+
+        Assert.Contains(endpoints, x => x.Route == "/api/templates/optional/{id?}");
+        Assert.Contains(endpoints, x => x.Route == "/api/templates/constrained/{id:int}");
+    }
+
+    private static EndpointDefinition CreateEndpoint(string route) => new(
+        typeof(DiscoveryTests),
+        typeof(object).GetMethod(nameof(ToString))!,
+        route,
+        "GET",
+        [],
+        static (_, _) => null,
+        false,
+        [],
+        [],
+        [],
+        null);
+
+
     [HttpService("/api/test")]
     public sealed class TestService
     {
@@ -126,5 +254,58 @@ public sealed class DiscoveryTests
     {
         [HttpGet("/{*path}")]
         public string Get([FromRoute] string path) => path;
+    }
+
+    [HttpService("/api/templates")]
+    private sealed class RouteTemplateService
+    {
+        [HttpGet("/optional/{id?}")]
+        public string Optional([FromRoute] int? id) => id?.ToString() ?? "none";
+
+        [HttpGet("/constrained/{id:int}")]
+        public string Constrained([FromRoute] int id) => id.ToString();
+    }
+
+    private sealed class MultipleHttpMethods
+    {
+        [HttpGet]
+        [HttpPost]
+        public string Get() => "x";
+    }
+
+    private sealed class StaticEndpoint
+    {
+        [HttpGet]
+        public static string Get() => "x";
+    }
+
+    private sealed class GenericEndpoint
+    {
+        [HttpGet]
+        public T Get<T>() => default!;
+    }
+
+    private sealed class MultipleBindingAttributes
+    {
+        public string Get([FromQuery][FromBody] string value) => value;
+    }
+
+    private sealed class BadRouteParameter
+    {
+        public string Get([FromRoute] int id) => id.ToString();
+    }
+
+    private sealed class MultipleBodies
+    {
+        public string Get(BodyOne first, BodyTwo second) => $"{first.GetHashCode()}{second.GetHashCode()}";
+    }
+
+    private sealed class BodyOne { }
+
+    private sealed class BodyTwo { }
+
+    private sealed class GenericService<T>
+    {
+        public T Value { get; } = default!;
     }
 }

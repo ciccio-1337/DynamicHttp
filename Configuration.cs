@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace DynamicHttp;
 
@@ -18,6 +19,7 @@ public sealed class DynamicHttpOptions
         }
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public void ScanCallingAssembly() => ScanAssemblies(Assembly.GetCallingAssembly());
 }
 
@@ -37,17 +39,40 @@ public static class DynamicHttpServiceCollectionExtensions
             options.ScanAssemblies(Assembly.GetCallingAssembly());
         }
 
-        services.AddSingleton(options);
-        services.AddSingleton<DynamicHttpRegistry>();
+        DynamicHttpOptions? existing = services
+            .Where(descriptor => descriptor.ServiceType == typeof(DynamicHttpOptions))
+            .Select(descriptor => descriptor.ImplementationInstance)
+            .OfType<DynamicHttpOptions>()
+            .FirstOrDefault();
 
+        if (existing is null)
+        {
+            services.AddSingleton(options);
+            existing = options;
+        }
+        else
+        {
+            // Keep the first registration (and its already-built registry) and merge the new
+            // assemblies into it so repeated AddDynamicHttp calls are additive and idempotent.
+            existing.ScanAssemblies([.. options.Assemblies]);
+        }
+
+        services.TryAddSingleton<DynamicHttpRegistry>();
+        RegisterDiscoveredServices(services, existing);
+
+        return services;
+    }
+
+    private static void RegisterDiscoveredServices(IServiceCollection services, DynamicHttpOptions options)
+    {
         foreach (var assembly in options.Assemblies.Distinct())
         {
             foreach (var type in DynamicHttpDiscovery.FindServices(assembly))
             {
-                services.Add(new ServiceDescriptor(type, type, options.DefaultServiceLifetime));
+                // TryAdd preserves registrations made by the application (custom lifetime,
+                // factory or implementation) and makes repeated scans a no-op.
+                services.TryAdd(new ServiceDescriptor(type, type, options.DefaultServiceLifetime));
             }
         }
-
-        return services;
     }
 }

@@ -41,9 +41,28 @@ public sealed class LoggingTests
 
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
 
-        Assert.Contains(provider.Records,
-            r => r.Level == LogLevel.Error &&
-                 r.Message.Contains(nameof(ExplodingService), StringComparison.Ordinal));
+        var error = Assert.Single(provider.Records, r => r.Level == LogLevel.Error);
+        Assert.Contains(nameof(ExplodingService), error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Client_disconnect_is_not_logged_as_an_error()
+    {
+        var provider = new CapturingLoggerProvider();
+        await using WebApplication app = await StartAppAsync(provider);
+        var client = app.GetTestClient();
+
+        try
+        {
+            await client.GetAsync("/api/values/abort");
+        }
+        catch (Exception)
+        {
+            // Aborting the request can surface as a connection error on the client; the point of
+            // this test is the server-side logging behavior.
+        }
+
+        Assert.DoesNotContain(provider.Records, r => r.Level == LogLevel.Error);
     }
 
     private static async Task<WebApplication> StartAppAsync(CapturingLoggerProvider provider)

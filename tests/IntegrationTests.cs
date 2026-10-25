@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.Net;
+using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -349,7 +351,7 @@ public sealed class IntegrationTests
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddDynamicHttp();
-        WebApplication app = builder.Build();
+        await using WebApplication app = builder.Build();
         app.UseDynamicHttpExceptionHandling();
         app.MapDynamicHttp();
         await app.StartAsync();
@@ -359,6 +361,168 @@ public sealed class IntegrationTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("\"plain\"", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Nullable_body_accepts_json_null()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        foreach (string path in new[] { "/api/values/nullablebody", "/api/values/nullableint" })
+        {
+            var response = await client.PostAsync(path,
+                new StringContent("null", Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal("\"<null>\"", await response.Content.ReadAsStringAsync());
+        }
+    }
+
+    [Fact]
+    public async Task Unsupported_body_type_returns_bad_request()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.PostAsync("/api/values/form",
+            new StringContent("{}", Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Route_parameter_uses_inline_default()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var defaulted = await client.GetAsync("/api/values/route-default");
+        Assert.Equal("\"10\"", await defaulted.Content.ReadAsStringAsync());
+
+        var explicitValue = await client.GetAsync("/api/values/route-default/7");
+        Assert.Equal("\"7\"", await explicitValue.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Framework_types_are_injected()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        Assert.Equal("\"/api/values/httpcontext\"",
+            await client.GetStringAsync("/api/values/httpcontext"));
+        Assert.Equal("\"GET\"", await client.GetStringAsync("/api/values/httprequest"));
+        Assert.Equal("\"200\"", await client.GetStringAsync("/api/values/httpresponse"));
+        Assert.Equal("\"anon\"", await client.GetStringAsync("/api/values/user"));
+    }
+
+    [Fact]
+    public async Task Async_result_shapes_are_supported()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        Assert.Equal("task-iresult", await client.GetStringAsync("/api/values/taskiresult"));
+        Assert.Equal("valuetask-iresult", await client.GetStringAsync("/api/values/valuetaskiresult"));
+        Assert.Equal("42", await client.GetStringAsync("/api/values/valuetaskint"));
+
+        var valueTaskOnly = await client.GetAsync("/api/values/valuetaskonly");
+        Assert.Equal(HttpStatusCode.OK, valueTaskOnly.StatusCode);
+    }
+
+    [Fact]
+    public async Task Faulted_task_returns_internal_server_error()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/taskfault");
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Faulted_value_task_returns_internal_server_error()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/valuetaskfault");
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Custom_task_subclass_result_is_not_lost()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/customtask");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("\"custom-task\"", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Enum_numeric_overflow_returns_bad_request()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/enum/99999999999999999999");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Decimal_overflow_returns_bad_request()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/decimal/99999999999999999999999999999999");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Missing_required_header_returns_bad_request()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/header");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Scoped_services_are_created_per_request()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        string first = await client.GetStringAsync("/api/scoped");
+        string second = await client.GetStringAsync("/api/scoped");
+
+        Assert.NotEqual(first, second);
+    }
+
+    [Fact]
+    public async Task Unexpected_exception_does_not_leak_details()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/explode");
+        string body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.DoesNotContain("boom", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(nameof(InvalidOperationException), body, StringComparison.Ordinal);
+        Assert.Contains("traceId", body, StringComparison.Ordinal);
     }
 }
 
@@ -394,6 +558,66 @@ public sealed class ValuesService
 
     [HttpGet("/mixeddefaults")]
     public string MixedDefaults([FromQuery] string mode = "fast", [FromQuery] int? count = 5) => $"{mode}|{count}";
+
+    [HttpPost("/nullablebody")]
+    public string NullableBody([FromBody] string? value) => value ?? "<null>";
+
+    [HttpPost("/nullableint")]
+    public string NullableInt([FromBody] int? value) => value?.ToString(CultureInfo.InvariantCulture) ?? "<null>";
+
+    [HttpPost("/form")]
+    public string Form([FromBody] IFormFile file) => file.FileName;
+
+    [HttpGet("/route-default/{page=10}")]
+    public string RouteDefault([FromRoute] int page) => page.ToString(CultureInfo.InvariantCulture);
+
+    [HttpGet("/httpcontext")]
+    public string HttpContextParam(HttpContext context) => context.Request.Path.ToString();
+
+    [HttpGet("/httprequest")]
+    public string HttpRequestParam(HttpRequest request) => request.Method;
+
+    [HttpGet("/httpresponse")]
+    public string HttpResponseParam(HttpResponse response) =>
+        response.StatusCode.ToString(CultureInfo.InvariantCulture);
+
+    [HttpGet("/user")]
+    public string UserParam(ClaimsPrincipal user) => user.Identity?.IsAuthenticated == true ? "auth" : "anon";
+
+    [HttpGet("/taskiresult")]
+    public Task<IResult> TaskIResult() => Task.FromResult(Results.Text("task-iresult"));
+
+    [HttpGet("/valuetaskiresult")]
+    public ValueTask<IResult> ValueTaskIResult() =>
+        ValueTask.FromResult(Results.Text("valuetask-iresult"));
+
+    [HttpGet("/valuetaskint")]
+    public ValueTask<int> ValueTaskInt() => ValueTask.FromResult(42);
+
+    [HttpGet("/valuetaskonly")]
+    public ValueTask ValueTaskOnly() => ValueTask.CompletedTask;
+
+    [HttpGet("/taskfault")]
+    public Task<string> TaskFault() =>
+        Task.FromException<string>(new InvalidOperationException("task-boom"));
+
+    [HttpGet("/valuetaskfault")]
+    public ValueTask<string> ValueTaskFault() =>
+        ValueTask.FromException<string>(new InvalidOperationException("valuetask-boom"));
+
+    [HttpGet("/abort")]
+    public string Abort(HttpContext context)
+    {
+        context.Abort();
+        throw new OperationCanceledException(context.RequestAborted);
+    }
+
+    [HttpGet("/customtask")]
+    public Task<string> CustomTask() => CustomTask<string>.StartNew("custom-task");
+
+    [HttpGet("/decimal/{value}")]
+    public string DecimalRoute([FromRoute] decimal value) =>
+        value.ToString(CultureInfo.InvariantCulture);
 
     [HttpGet("/header")]
     public string Header([FromHeader("X-Trace")] string trace) => trace;
@@ -432,7 +656,28 @@ public sealed class ValuesService
 
 public enum Color { Red, Green, Blue }
 
+[HttpService("/api/scoped")]
+public sealed class ScopedProbeService
+{
+    public Guid Id { get; } = Guid.NewGuid();
+
+    [HttpGet]
+    public string Get() => Id.ToString();
+}
+
 public sealed record BodyRequest(string Name, int Age);
+
+public sealed class CustomTask<T>(T result) : Task<T>(() => result)
+{
+    // Task<T>(Func<T>) creates a cold task; callers must start it before awaiting it.
+    public static CustomTask<T> StartNew(T result)
+    {
+        var task = new CustomTask<T>(result);
+        task.Start(TaskScheduler.Default);
+
+        return task;
+    }
+}
 
 public sealed class Greeter
 {
