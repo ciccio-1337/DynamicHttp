@@ -1,4 +1,6 @@
+using System.ComponentModel.DataAnnotations;
 using DynamicHttp.Tests.Fixtures;
+using Microsoft.AspNetCore.Authorization;
 using Xunit;
 
 namespace DynamicHttp.Tests;
@@ -194,6 +196,88 @@ public sealed class DiscoveryTests
         Assert.Contains(endpoints, x => x.Route == "/api/templates/constrained/{id:int}");
     }
 
+    [Fact]
+    public void Framework_authorize_attribute_is_collected()
+    {
+        var endpoints = DynamicHttpDiscovery.Build([typeof(DiscoveryTests).Assembly]);
+        var serviceEndpoints = endpoints
+            .Where(x => x.ServiceType == typeof(FrameworkAuthorizedService))
+            .ToArray();
+
+        Assert.Equal(2, serviceEndpoints.Length);
+        Assert.All(serviceEndpoints, endpoint =>
+        {
+            var authorization = Assert.Single(endpoint.Authorization);
+            Assert.Equal("read", authorization.Policy);
+            Assert.Equal(TestScheme, authorization.AuthenticationSchemes);
+        });
+    }
+
+    [Fact]
+    public void Framework_allow_anonymous_overrides_class_authorize()
+    {
+        var method = typeof(FrameworkAuthorizedService)
+            .GetMethod(nameof(FrameworkAuthorizedService.Public))!;
+
+        DynamicHttpDiscovery.ValidateAuthorization(typeof(FrameworkAuthorizedService), method);
+    }
+
+    [Fact]
+    public void Framework_authorize_and_allow_anonymous_on_same_method_throws()
+    {
+        var method = typeof(FrameworkAuthorizeAndAnonymous)
+            .GetMethod(nameof(FrameworkAuthorizeAndAnonymous.Get))!;
+
+        Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateAuthorization(typeof(FrameworkAuthorizeAndAnonymous), method));
+    }
+
+    [Fact]
+    public void Mvc_binding_attribute_throws_configuration_error()
+    {
+        var method = typeof(MvcBindingService)
+            .GetMethod(nameof(MvcBindingService.Get))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(MvcBindingService), method));
+
+        Assert.Contains("MVC binding attribute", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Antiforgery_attribute_is_reflected_in_endpoint_definition()
+    {
+        var endpoints = DynamicHttpDiscovery.Build([typeof(DiscoveryTests).Assembly]);
+        var endpoint = Assert.Single(endpoints, x => x.ServiceType == typeof(AntiforgeryService));
+
+        Assert.True(endpoint.RequireAntiforgery);
+    }
+
+    [Fact]
+    public void Parameter_without_nullable_annotations_is_required()
+    {
+        var method = typeof(NullabilityDisabledService)
+            .GetMethod(nameof(NullabilityDisabledService.Get))!;
+
+        var parameter = Assert.Single(DynamicHttpDiscovery.BuildParameters(typeof(NullabilityDisabledService), method));
+
+        Assert.False(parameter.IsNullable);
+    }
+
+    [Fact]
+    public void Parameter_validation_attributes_are_collected()
+    {
+        var method = typeof(ValidatedParameterService)
+            .GetMethod(nameof(ValidatedParameterService.Get))!;
+
+        var parameter = Assert.Single(
+            DynamicHttpDiscovery.BuildParameters(typeof(ValidatedParameterService), method));
+
+        Assert.Single(parameter.ValidationAttributes);
+    }
+
+    private const string TestScheme = "Test";
+
     private static EndpointDefinition CreateEndpoint(string route) => new(
         typeof(DiscoveryTests),
         typeof(object).GetMethod(nameof(ToString))!,
@@ -307,5 +391,45 @@ public sealed class DiscoveryTests
     private sealed class GenericService<T>
     {
         public T Value { get; } = default!;
+    }
+
+    // The route prefix differs from the public FrameworkAuthorizationService used by the
+    // integration tests: both types live in the same test assembly, so sharing a prefix would
+    // be reported as a conflicting-endpoint configuration error by every whole-assembly scan.
+    [HttpService("/api/discovery-framework-auth")]
+    [Authorize(Policy = "read", AuthenticationSchemes = TestScheme)]
+    private sealed class FrameworkAuthorizedService
+    {
+        [HttpGet("/protected")]
+        public string Protected() => "protected";
+
+        [HttpGet("/public")]
+        [AllowAnonymous]
+        public string Public() => "public";
+    }
+
+    private sealed class FrameworkAuthorizeAndAnonymous
+    {
+        [Authorize]
+        [AllowAnonymous]
+        public string Get() => "x";
+    }
+
+    private sealed class MvcBindingService
+    {
+        public string Get([Microsoft.AspNetCore.Mvc.FromQuery] string value) => value;
+    }
+
+    [HttpService("/api/antiforgery")]
+    private sealed class AntiforgeryService
+    {
+        [HttpPost]
+        [DynamicAntiforgery]
+        public string Create() => "created";
+    }
+
+    private sealed class ValidatedParameterService
+    {
+        public string Get([FromQuery, Range(1, 10)] int page) => page.ToString();
     }
 }

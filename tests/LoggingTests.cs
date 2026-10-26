@@ -46,6 +46,23 @@ public sealed class LoggingTests
     }
 
     [Fact]
+    public async Task Rejected_request_values_are_not_logged()
+    {
+        var provider = new CapturingLoggerProvider();
+        await using WebApplication app = await StartAppAsync(provider);
+        var client = app.GetTestClient();
+
+        // A value that fails conversion must not be echoed into logs (secret/PII leak and
+        // CRLF/ANSI log injection vector).
+        var response = await client.GetAsync("/api/values/query?page=logging-secret-value");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.DoesNotContain(provider.Records,
+            r => r.Message.Contains("DynamicHttp", StringComparison.Ordinal) &&
+                r.Message.Contains("logging-secret-value", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Client_disconnect_is_not_logged_as_an_error()
     {
         var provider = new CapturingLoggerProvider();

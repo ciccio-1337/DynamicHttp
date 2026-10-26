@@ -59,6 +59,14 @@ public sealed class DynamicAuthorizeAttribute : Attribute
 [AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = false, Inherited = true)]
 public sealed class DynamicAllowAnonymousAttribute : Attribute;
 
+/// <summary>
+/// Requires ASP.NET Core antiforgery validation for the endpoint (or every endpoint of the
+/// service). Register <c>app.UseAntiforgery()</c> in the pipeline; use this on cookie-authenticated
+/// state-changing endpoints to protect against CSRF.
+/// </summary>
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = false, Inherited = true)]
+public sealed class DynamicAntiforgeryAttribute : Attribute;
+
 [AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = true, Inherited = true)]
 public sealed class ProducesResponseTypeAttribute(int statusCode, Type? responseType = null) : Attribute
 {

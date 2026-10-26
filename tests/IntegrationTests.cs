@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using System.Globalization;
 using System.Net;
 using System.Security.Claims;
@@ -13,12 +14,17 @@ namespace DynamicHttp.Tests;
 
 public sealed class IntegrationTests
 {
-    private static async Task<WebApplication> StartAppAsync(Action<IServiceCollection>? configure = null)
+    private static async Task<WebApplication> StartAppAsync(
+        Action<IServiceCollection>? configure = null,
+        Action<DynamicHttpOptions>? configureOptions = null)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddDynamicHttp(options =>
-            options.ScanAssemblies(typeof(ValuesService).Assembly));
+        {
+            options.ScanAssemblies(typeof(ValuesService).Assembly);
+            configureOptions?.Invoke(options);
+        });
         configure?.Invoke(builder.Services);
 
         WebApplication app = builder.Build();
@@ -477,6 +483,105 @@ public sealed class IntegrationTests
     }
 
     [Fact]
+    public async Task Undefined_enum_numeric_value_returns_bad_request()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/enum/999");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Invalid_value_is_not_echoed_in_problem_details()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/query?page=supersecret-value");
+        string body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.DoesNotContain("supersecret-value", body, StringComparison.Ordinal);
+        Assert.Contains("detail", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Body_over_configured_limit_returns_payload_too_large()
+    {
+        await using WebApplication app = await StartAppAsync(
+            configureOptions: options => options.MaxRequestBodyBytes = 8);
+        var client = app.GetTestClient();
+
+        var response = await client.PostAsync("/api/values/body",
+            new StringContent("""{"name":"mario","age":42}""", Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Parameter_validation_attribute_is_enforced()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await client.GetAsync("/api/values/validated?page=0")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.GetAsync("/api/values/validated?page=5")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Body_model_validation_attribute_is_enforced()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var invalid = await client.PostAsync("/api/values/validatedbody",
+            new StringContent("""{"name":""}""", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+
+        var valid = await client.PostAsync("/api/values/validatedbody",
+            new StringContent("""{"name":"ok"}""", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+    }
+
+    [Fact]
+    public async Task Missing_value_on_nullable_oblivious_service_returns_bad_request()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/nullability-disabled/missing");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Antiforgery_attribute_requires_a_token()
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddAntiforgery();
+        builder.Services.AddDynamicHttp(options =>
+            options.ScanAssemblies(typeof(ValuesService).Assembly));
+
+        await using WebApplication app = builder.Build();
+        app.UseRouting();
+        app.UseDynamicHttpExceptionHandling();
+        app.UseAntiforgery();
+        app.MapDynamicHttp();
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.PostAsync("/api/values/antiforgery",
+            new StringContent("", Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Decimal_overflow_returns_bad_request()
     {
         await using WebApplication app = await StartAppAsync();
@@ -628,6 +733,17 @@ public sealed class ValuesService
     [HttpGet("/enum/{color}")]
     public string EnumRoute([FromRoute] Color color) => color.ToString();
 
+    [HttpGet("/validated")]
+    public string Validated([FromQuery, Range(1, 10)] int page) =>
+        page.ToString(CultureInfo.InvariantCulture);
+
+    [HttpPost("/validatedbody")]
+    public string ValidatedBody([FromBody] ValidatedBodyRequest request) => request.Name;
+
+    [HttpPost("/antiforgery")]
+    [DynamicAntiforgery]
+    public string Antiforgery() => "antiforgery";
+
     [HttpGet("/time/{t}")]
     public string TimeRoute([FromRoute] TimeSpan t) => t.ToString();
 
@@ -666,6 +782,8 @@ public sealed class ScopedProbeService
 }
 
 public sealed record BodyRequest(string Name, int Age);
+
+public sealed record ValidatedBodyRequest([property: Required] string Name);
 
 public sealed class CustomTask<T>(T result) : Task<T>(() => result)
 {

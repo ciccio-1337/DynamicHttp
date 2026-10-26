@@ -7,8 +7,13 @@ builder.Services.AddDynamicHttp(options =>
     options.ScanAssemblies(typeof(Sample.UserService).Assembly);
 });
 // Dev-only identity provider so the sample's [DynamicAuthorize] endpoints can be exercised
-// without a real IdP, e.g. `curl -H 'X-Dev-User: mario' ...`. Do not reuse in production.
-if (builder.Environment.IsDevelopment())
+// without a real IdP. It must be explicitly enabled (DevAuth:Enabled=true) and is restricted to
+// loopback requests: `dotnet run --project Sample -- --DevAuth:Enabled=true`.
+// Do not reuse in production.
+bool devAuthEnabled = builder.Environment.IsDevelopment() &&
+    builder.Configuration.GetValue<bool>("DevAuth:Enabled");
+
+if (devAuthEnabled)
 {
     builder.Services
         .AddAuthentication(Sample.DevAuthHandler.SchemeName)
@@ -24,6 +29,13 @@ else
 builder.Services.AddAuthorizationBuilder().AddPolicy("users.read", policy => policy.RequireClaim("users.read", ["true"]));
 
 var app = builder.Build();
+
+if (devAuthEnabled)
+{
+    app.Logger.LogWarning(
+        "Development authentication is enabled: any loopback request with the X-Dev-User header is authenticated. " +
+        "Never enable DevAuth outside local development.");
+}
 
 app.UseDynamicHttpExceptionHandling();
 app.UseAuthentication();

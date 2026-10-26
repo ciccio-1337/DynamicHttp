@@ -50,6 +50,16 @@ public class BadRequestHttpException : HttpException
     public override string? Type => "https://httpstatuses.com/400";
 }
 
+public class PayloadTooLargeHttpException : HttpException
+{
+    public PayloadTooLargeHttpException(string detail) : base(detail) { }
+    public PayloadTooLargeHttpException(string detail, Exception innerException) : base(detail, innerException) { }
+
+    public override int StatusCode => StatusCodes.Status413PayloadTooLarge;
+    public override string Title => "Payload too large";
+    public override string? Type => "https://httpstatuses.com/413";
+}
+
 public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<DynamicHttpExceptionHandler> logger)
 {
     internal const string LoggedExceptionItemKey = "DynamicHttp.ExceptionLogged";
@@ -69,24 +79,58 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
             }
 
             IHttpException? typed = exception as IHttpException;
+            int statusCode;
+            string title;
+            string? detail;
+            string? type;
 
             if (typed is not null)
             {
-                logger.LogInformation(exception,
+                statusCode = typed.StatusCode;
+                title = typed.Title;
+                detail = typed.Detail;
+                type = typed.Type;
+
+                // Log a stable message only: exception messages can contain attacker-controlled
+                // values (log injection) or sensitive data copied from the request.
+                logger.LogInformation(
                     "DynamicHttp request failed for {Method} {Path} with status code {StatusCode}",
                     context.Request.Method,
                     context.Request.Path,
-                    typed.StatusCode);
+                    statusCode);
             }
-            else if (!context.Items.ContainsKey(LoggedExceptionItemKey))
+            else if (exception is BadHttpRequestException badRequest)
             {
-                // DynamicHttp endpoints log unexpected exceptions with service/method context;
-                // only log here when the exception did not come from a mapped endpoint.
-                logger.LogError(exception,
-                    "Unhandled DynamicHttp exception for {Method} {Path}. TraceId: {TraceId}",
+                // Framework rejections (for example a body larger than the server limit) are
+                // client errors. Never echo their message, which may contain internals.
+                statusCode = badRequest.StatusCode;
+                title = TitleFor(statusCode);
+                detail = null;
+                type = null;
+
+                logger.LogInformation(
+                    "DynamicHttp request failed for {Method} {Path} with status code {StatusCode}",
                     context.Request.Method,
                     context.Request.Path,
-                    context.TraceIdentifier);
+                    statusCode);
+            }
+            else
+            {
+                statusCode = StatusCodes.Status500InternalServerError;
+                title = "An unexpected error occurred.";
+                detail = null;
+                type = null;
+
+                if (!context.Items.ContainsKey(LoggedExceptionItemKey))
+                {
+                    // DynamicHttp endpoints log unexpected exceptions with service/method context;
+                    // only log here when the exception did not come from a mapped endpoint.
+                    logger.LogError(exception,
+                        "Unhandled DynamicHttp exception for {Method} {Path}. TraceId: {TraceId}",
+                        context.Request.Method,
+                        context.Request.Path,
+                        context.TraceIdentifier);
+                }
             }
 
             if (context.Response.HasStarted)
@@ -94,16 +138,23 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
                 throw;
             }
 
-            await Results.Problem(statusCode: typed?.StatusCode ?? StatusCodes.Status500InternalServerError,
-                title: typed?.Title ?? "An unexpected error occurred.",
-                detail: typed?.Detail,
-                type: typed?.Type,
+            await Results.Problem(statusCode: statusCode,
+                title: title,
+                detail: detail,
+                type: type,
                 extensions: new Dictionary<string, object?>
                 {
                     ["traceId"] = context.TraceIdentifier
                 }).ExecuteAsync(context);
         }
     }
+
+    private static string TitleFor(int statusCode) => statusCode switch
+    {
+        StatusCodes.Status400BadRequest => "Bad request",
+        StatusCodes.Status413PayloadTooLarge => "Payload too large",
+        _ => "Request rejected"
+    };
 }
 
 public static class DynamicHttpExceptionApplicationExtensions

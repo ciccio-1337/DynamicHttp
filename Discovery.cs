@@ -1,6 +1,9 @@
+using System.Collections.Concurrent;
+using System.ComponentModel.DataAnnotations;
 using System.Reflection;
 using System.Security.Claims;
 using System.Text;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing.Patterns;
 
@@ -8,6 +11,18 @@ namespace DynamicHttp;
 
 internal static class DynamicHttpDiscovery
 {
+    private static readonly ConcurrentDictionary<Type, bool> ObjectValidationCache = new();
+
+    private static readonly Type[] MvcBindingAttributeTypes =
+    [
+        typeof(Microsoft.AspNetCore.Mvc.FromRouteAttribute),
+        typeof(Microsoft.AspNetCore.Mvc.FromQueryAttribute),
+        typeof(Microsoft.AspNetCore.Mvc.FromHeaderAttribute),
+        typeof(Microsoft.AspNetCore.Mvc.FromBodyAttribute),
+        typeof(Microsoft.AspNetCore.Mvc.FromFormAttribute),
+        typeof(Microsoft.AspNetCore.Mvc.FromServicesAttribute)
+    ];
+
     public static IReadOnlyList<Type> FindServices(Assembly assembly)
     {
         // GetTypes() throws ReflectionTypeLoadException when some types can't be loaded (e.g.
@@ -71,14 +86,11 @@ internal static class DynamicHttpDiscovery
 
                     ValidateParameters(route, parameters, serviceType, method);
 
-                    var authorization = serviceType.GetCustomAttributes<DynamicAuthorizeAttribute>(true)
-                        .Concat(method.GetCustomAttributes<DynamicAuthorizeAttribute>(true))
-                        .ToArray();
+                    var authorization = GetAuthorization(serviceType, method);
                     var responses = serviceType.GetCustomAttributes<ProducesResponseTypeAttribute>(true)
                         .Concat(method.GetCustomAttributes<ProducesResponseTypeAttribute>(true))
                         .ToArray();
-                    bool allowAnonymous = serviceType.IsDefined(typeof(DynamicAllowAnonymousAttribute), true) ||
-                        method.IsDefined(typeof(DynamicAllowAnonymousAttribute), true);
+                    bool allowAnonymous = IsAllowAnonymous(serviceType) || IsAllowAnonymous(method);
 
                     ValidateAuthorization(serviceType, method);
 
@@ -92,7 +104,8 @@ internal static class DynamicHttpDiscovery
                         authorization,
                         responses,
                         [.. service.Tags.Concat(http.Tags).Distinct()],
-                        service.GroupName));
+                        service.GroupName,
+                        IsAntiforgeryRequired(serviceType, method)));
                 }
             }
         }
@@ -138,55 +151,72 @@ internal static class DynamicHttpDiscovery
         var nullability = new NullabilityInfoContext();
 
         return [.. method.GetParameters().Select(p =>
+            CreateDefinition(serviceType, method, p, nullability))];
+    }
+
+    private static ParameterDefinition CreateDefinition(Type serviceType,
+        MethodInfo method,
+        ParameterInfo p,
+        NullabilityInfoContext nullability)
+    {
+        // The library defines its own binding attributes. An MVC/ASP.NET attribute with the same
+        // name would be silently ignored and the parameter would bind from the default source
+        // (possibly a querystring instead of a header), so reject the ambiguity at startup.
+        var mvcBindingAttributes = p.GetCustomAttributes()
+            .Where(a => MvcBindingAttributeTypes.Any(t => t.IsInstanceOfType(a)))
+            .ToArray();
+
+        if (mvcBindingAttributes.Length > 0)
         {
-            var bindingAttributes = p.GetCustomAttributes()
-                .Where(a => a is FromRouteAttribute or FromQueryAttribute or FromHeaderAttribute or
-                    FromBodyAttribute or FromServicesAttribute)
-                .ToArray();
+            throw Configuration(serviceType, method,
+                $"Parameter '{p.Name}' uses the MVC binding attribute " +
+                $"'{mvcBindingAttributes[0].GetType().Name}'; use the DynamicHttp attribute instead.");
+        }
 
-            if (bindingAttributes.Length > 1)
-            {
-                throw Configuration(serviceType, method,
-                    $"Parameter '{p.Name}' has multiple binding attributes " +
-                    $"({string.Join(", ", bindingAttributes.Select(a => a.GetType().Name))}); use only one.");
-            }
+        var bindingAttributes = p.GetCustomAttributes()
+            .Where(a => a is FromRouteAttribute or FromQueryAttribute or FromHeaderAttribute or
+                FromBodyAttribute or FromServicesAttribute)
+            .ToArray();
 
-            var attribute = bindingAttributes.FirstOrDefault();
+        if (bindingAttributes.Length > 1)
+        {
+            throw Configuration(serviceType, method,
+                $"Parameter '{p.Name}' has multiple binding attributes " +
+                $"({string.Join(", ", bindingAttributes.Select(a => a.GetType().Name))}); use only one.");
+        }
 
-            // Auto-detect framework types and CancellationToken only when no binding attribute is
-            // present; an explicit attribute always wins.
-            if (attribute is null)
-            {
-                if (p.ParameterType == typeof(CancellationToken))
-                {
-                    return CreateParameter(p,
-                        BindingKind.CancellationToken,
-                        p.Name ?? "cancellationToken",
-                        nullability);
-                }
+        var attribute = bindingAttributes.FirstOrDefault();
 
-                if (p.ParameterType == typeof(HttpContext))
-                {
-                    return CreateParameter(p, BindingKind.HttpContext, p.Name!, nullability);
-                }
+        ParameterDefinition definition;
 
-                if (p.ParameterType == typeof(HttpRequest))
-                {
-                    return CreateParameter(p, BindingKind.HttpRequest, p.Name!, nullability);
-                }
-
-                if (p.ParameterType == typeof(HttpResponse))
-                {
-                    return CreateParameter(p, BindingKind.HttpResponse, p.Name!, nullability);
-                }
-
-                if (p.ParameterType == typeof(ClaimsPrincipal))
-                {
-                    return CreateParameter(p, BindingKind.User, p.Name!, nullability);
-                }
-            }
-
-            return attribute switch
+        // Auto-detect framework types and CancellationToken only when no binding attribute is
+        // present; an explicit attribute always wins.
+        if (attribute is null && p.ParameterType == typeof(CancellationToken))
+        {
+            definition = CreateParameter(p,
+                BindingKind.CancellationToken,
+                p.Name ?? "cancellationToken",
+                nullability);
+        }
+        else if (attribute is null && p.ParameterType == typeof(HttpContext))
+        {
+            definition = CreateParameter(p, BindingKind.HttpContext, p.Name!, nullability);
+        }
+        else if (attribute is null && p.ParameterType == typeof(HttpRequest))
+        {
+            definition = CreateParameter(p, BindingKind.HttpRequest, p.Name!, nullability);
+        }
+        else if (attribute is null && p.ParameterType == typeof(HttpResponse))
+        {
+            definition = CreateParameter(p, BindingKind.HttpResponse, p.Name!, nullability);
+        }
+        else if (attribute is null && p.ParameterType == typeof(ClaimsPrincipal))
+        {
+            definition = CreateParameter(p, BindingKind.User, p.Name!, nullability);
+        }
+        else
+        {
+            definition = attribute switch
             {
                 FromRouteAttribute a => CreateParameter(p, BindingKind.Route, a.Name ?? p.Name!, nullability),
                 FromQueryAttribute a => CreateParameter(p, BindingKind.Query, a.Name ?? p.Name!, nullability),
@@ -196,7 +226,16 @@ internal static class DynamicHttpDiscovery
                 _ when IsSimple(p.ParameterType) => CreateParameter(p, BindingKind.Query, p.Name!, nullability),
                 _ => CreateParameter(p, BindingKind.Body, p.Name!, nullability)
             };
-        })];
+        }
+
+        return definition with
+        {
+            ValidationAttributes = p.GetCustomAttributes<ValidationAttribute>(true).ToArray(),
+            // Object validation applies to body models. Injected services and framework
+            // parameters are not DataAnnotations models and must not be validated.
+            RequiresObjectValidation = definition.Kind == BindingKind.Body &&
+                HasObjectValidation(p.ParameterType)
+        };
     }
 
     private static ParameterDefinition CreateParameter(ParameterInfo parameter,
@@ -222,9 +261,26 @@ internal static class DynamicHttpDiscovery
             return false;
         }
 
-        // Unknown means the declaring assembly does not use nullable reference annotations;
-        // keep the historical (optional) behavior instead of enforcing a missing value.
-        return nullability.Create(parameter).ReadState != NullabilityState.NotNull;
+        // Unknown means the declaring assembly does not use nullable reference annotations.
+        // Treat it as required instead of silently turning a required value into null; declared
+        // C# default values are still honored by the binder.
+        return nullability.Create(parameter).ReadState == NullabilityState.Nullable;
+    }
+
+    private static bool HasObjectValidation(Type type)
+    {
+        type = Nullable.GetUnderlyingType(type) ?? type;
+
+        return ObjectValidationCache.GetOrAdd(type, static candidate =>
+        {
+            if (typeof(IValidatableObject).IsAssignableFrom(candidate))
+            {
+                return true;
+            }
+
+            return candidate.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+                .Any(property => property.GetCustomAttributes<ValidationAttribute>(true).Any());
+        });
     }
 
     private static bool IsSimple(Type type)
@@ -240,23 +296,76 @@ internal static class DynamicHttpDiscovery
 
     internal static void ValidateAuthorization(Type serviceType, MethodInfo method)
     {
-        bool classAnonymous = serviceType.IsDefined(typeof(DynamicAllowAnonymousAttribute), true);
-        bool methodAnonymous = method.IsDefined(typeof(DynamicAllowAnonymousAttribute), true);
-        bool classAuthorized = serviceType.IsDefined(typeof(DynamicAuthorizeAttribute), true);
-        bool methodAuthorized = method.IsDefined(typeof(DynamicAuthorizeAttribute), true);
+        bool classAnonymous = IsAllowAnonymous(serviceType);
+        bool methodAnonymous = IsAllowAnonymous(method);
+        bool classAuthorized = IsAuthorized(serviceType);
+        bool methodAuthorized = IsAuthorized(method);
 
         if (classAuthorized && classAnonymous)
         {
             throw Configuration(serviceType, method,
-                "A service cannot combine [DynamicAuthorize] and [DynamicAllowAnonymous] on the same class.");
+                "A service cannot combine an authorization attribute and an allow-anonymous attribute on the same class.");
         }
 
         if (methodAuthorized && (classAnonymous || methodAnonymous))
         {
             throw Configuration(serviceType, method,
-                "An endpoint that requires [DynamicAuthorize] cannot also be [DynamicAllowAnonymous]: 'AllowAnonymous' would silently bypass authorization.");
+                "An endpoint that requires authorization cannot also be marked as anonymous: 'AllowAnonymous' would silently bypass authorization.");
         }
     }
+
+    /// <summary>
+    /// Collects framework <see cref="IAuthorizeData"/> attributes and the library's
+    /// <see cref="DynamicAuthorizeAttribute"/> into normalized <see cref="AuthorizeAttribute"/>
+    /// metadata. All of them are applied, so mixing the two attribute families is fail-closed.
+    /// </summary>
+    private static AuthorizeAttribute[] GetAuthorization(Type serviceType, MethodInfo method) =>
+    [
+        .. serviceType.GetCustomAttributes(inherit: true).OfType<IAuthorizeData>()
+            .Select(ToAuthorizeAttribute),
+        .. method.GetCustomAttributes(inherit: true).OfType<IAuthorizeData>()
+            .Select(ToAuthorizeAttribute),
+        .. serviceType.GetCustomAttributes<DynamicAuthorizeAttribute>(true)
+            .Select(ToAuthorizeAttribute),
+        .. method.GetCustomAttributes<DynamicAuthorizeAttribute>(true)
+            .Select(ToAuthorizeAttribute)
+    ];
+
+    private static AuthorizeAttribute ToAuthorizeAttribute(IAuthorizeData data) =>
+        CreateAuthorization(data.Policy, data.Roles, data.AuthenticationSchemes);
+
+    private static AuthorizeAttribute ToAuthorizeAttribute(DynamicAuthorizeAttribute data) =>
+        CreateAuthorization(data.Policy, data.Roles, data.AuthenticationSchemes);
+
+    private static AuthorizeAttribute CreateAuthorization(string? policy, string? roles, string? schemes) =>
+        new()
+        {
+            Policy = Whitelist(policy),
+            Roles = Whitelist(roles),
+            AuthenticationSchemes = Whitelist(schemes)
+        };
+
+    private static string? Whitelist(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
+
+    private static bool IsAllowAnonymous(Type serviceType) =>
+        serviceType.IsDefined(typeof(DynamicAllowAnonymousAttribute), true) ||
+        serviceType.IsDefined(typeof(AllowAnonymousAttribute), true);
+
+    private static bool IsAllowAnonymous(MethodInfo method) =>
+        method.IsDefined(typeof(DynamicAllowAnonymousAttribute), true) ||
+        method.IsDefined(typeof(AllowAnonymousAttribute), true);
+
+    private static bool IsAuthorized(Type serviceType) =>
+        serviceType.IsDefined(typeof(DynamicAuthorizeAttribute), true) ||
+        serviceType.GetCustomAttributes(inherit: true).OfType<IAuthorizeData>().Any();
+
+    private static bool IsAuthorized(MethodInfo method) =>
+        method.IsDefined(typeof(DynamicAuthorizeAttribute), true) ||
+        method.GetCustomAttributes(inherit: true).OfType<IAuthorizeData>().Any();
+
+    private static bool IsAntiforgeryRequired(Type serviceType, MethodInfo method) =>
+        serviceType.IsDefined(typeof(DynamicAntiforgeryAttribute), true) ||
+        method.IsDefined(typeof(DynamicAntiforgeryAttribute), true);
 
     private static string CombineRoutes(string prefix, string template)
     {

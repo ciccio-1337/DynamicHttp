@@ -1,7 +1,9 @@
 using System.Diagnostics;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -21,6 +23,12 @@ public sealed class DynamicHttpRegistry
     }
 
     internal IReadOnlyList<EndpointDefinition> Definitions => _definitions.Value;
+
+    internal bool RequireAuthorizationByDefault => _options.RequireAuthorizationByDefault;
+
+    internal bool ValidateModels => _options.ValidateModels;
+
+    internal long? MaxRequestBodyBytes => _options.MaxRequestBodyBytes;
 }
 
 public static class DynamicHttpEndpointRouteBuilderExtensions
@@ -28,6 +36,15 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
     public static IEndpointRouteBuilder MapDynamicHttp(this IEndpointRouteBuilder endpoints)
     {
         var registry = endpoints.ServiceProvider.GetRequiredService<DynamicHttpRegistry>();
+
+        if (registry.RequireAuthorizationByDefault &&
+            endpoints.ServiceProvider.GetService<IAuthorizationPolicyProvider>() is null)
+        {
+            throw new DynamicHttpConfigurationException(
+                "DynamicHttp configuration error: RequireAuthorizationByDefault requires authorization services. " +
+                "Call AddAuthorization()/AddAuthorizationBuilder() when registering services and add " +
+                "UseAuthentication()/UseAuthorization() to the pipeline.");
+        }
 
         foreach (var definition in registry.Definitions)
         {
@@ -43,11 +60,39 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
 
                     try
                     {
+                        if (definition.RequireAntiforgery &&
+                            IsStateChangingMethod(definition.HttpMethod) &&
+                            context.Features.Get<IAntiforgeryValidationFeature>() is not { IsValid: true })
+                        {
+                            // AntiforgeryMiddleware validates the token and records the result in
+                            // this feature. Fail closed: a missing middleware (null feature) must
+                            // reject too, otherwise [DynamicAntiforgery] would silently do nothing.
+                            throw new BadRequestHttpException("The antiforgery token is missing or invalid.");
+                        }
+
+                        if (registry.MaxRequestBodyBytes is long maxRequestBodyBytes)
+                        {
+                            if (context.Request.ContentLength > maxRequestBodyBytes)
+                            {
+                                throw new PayloadTooLargeHttpException(
+                                    $"The request body exceeds the configured limit of {maxRequestBodyBytes} bytes.");
+                            }
+
+                            // Enforce the same limit for chunked bodies, where Content-Length is absent.
+                            if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } feature)
+                            {
+                                feature.MaxRequestBodySize = maxRequestBodyBytes;
+                            }
+                        }
+
                         object?[] arguments = new object?[definition.Parameters.Count];
 
                         for (int i = 0; i < definition.Parameters.Count; i++)
                         {
-                            arguments[i] = await DynamicHttpBinding.BindAsync(context, definition.Parameters[i]);
+                            object? argument = await DynamicHttpBinding.BindAsync(context, definition.Parameters[i]);
+                            DynamicHttpBinding.Validate(argument, definition.Parameters[i],
+                                context.RequestServices, registry.ValidateModels);
+                            arguments[i] = argument;
                         }
 
                         object service = context.RequestServices.GetRequiredService(definition.ServiceType);
@@ -57,7 +102,7 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
 
                         return result is IResult httpResult ? httpResult : Results.Ok(result);
                     }
-                    catch (Exception exception) when (exception is not IHttpException)
+                    catch (Exception exception) when (exception is not IHttpException and not BadHttpRequestException)
                     {
                         // Controlled HTTP exceptions (400, 404, …) are intentionally thrown by
                         // the service; DynamicHttpExceptionHandler logs them at Information. Log
@@ -92,17 +137,26 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
                 route.AllowAnonymous();
             }
 
-            foreach (var authorization in definition.Authorization)
+            foreach (AuthorizeAttribute authorization in definition.Authorization)
             {
-                // Apply every non-empty property on the same AuthorizeAttribute. Requiring each
-                // property separately could not express Policy + Roles + AuthenticationSchemes,
-                // and silently dropping a property would weaken authorization.
-                route.RequireAuthorization(new AuthorizeAttribute
-                {
-                    Policy = Whitelist(authorization.Policy),
-                    Roles = Whitelist(authorization.Roles),
-                    AuthenticationSchemes = Whitelist(authorization.AuthenticationSchemes)
-                });
+                // Discovery normalizes each attribute (policy/roles/schemes) and applies all of
+                // them to the same endpoint, so mixing DynamicHttp and framework attributes is
+                // fail-closed.
+                route.RequireAuthorization(authorization);
+            }
+
+            if (registry.RequireAuthorizationByDefault &&
+                definition.Authorization.Count == 0 &&
+                !definition.AllowAnonymous)
+            {
+                route.RequireAuthorization();
+            }
+
+            if (definition.RequireAntiforgery)
+            {
+                // The endpoint metadata consumed by AntiforgeryMiddleware. Requires
+                // app.UseAntiforgery() in the pipeline.
+                route.WithMetadata(new RequireAntiforgeryTokenAttribute(required: true));
             }
 
             foreach (string tag in definition.Tags)
@@ -131,5 +185,9 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
         return endpoints;
     }
 
-    private static string? Whitelist(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
+    private static bool IsStateChangingMethod(string httpMethod) =>
+        HttpMethods.IsPost(httpMethod) ||
+        HttpMethods.IsPut(httpMethod) ||
+        HttpMethods.IsPatch(httpMethod) ||
+        HttpMethods.IsDelete(httpMethod);
 }

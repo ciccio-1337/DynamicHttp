@@ -69,6 +69,19 @@ public sealed class ConfigurationTests
         var descriptor = Assert.Single(services, x => x.ServiceType == typeof(ValuesService));
         Assert.Equal(ServiceLifetime.Transient, descriptor.Lifetime);
     }
+
+    [Fact]
+    public void AddDynamicHttp_rejects_non_positive_body_limit()
+    {
+        var services = new ServiceCollection();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            services.AddDynamicHttp(options =>
+            {
+                options.ScanAssemblies(typeof(ValuesService).Assembly);
+                options.MaxRequestBodyBytes = 0;
+            }));
+    }
 }
 
 public sealed class AwaitingTests

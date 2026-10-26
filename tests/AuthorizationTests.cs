@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Claims;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
@@ -102,6 +103,71 @@ public sealed class AuthorizationTests
         Assert.Equal("\"public\"", await response.Content.ReadAsStringAsync());
     }
 
+    [Fact]
+    public async Task Framework_authorize_attribute_is_enforced()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await client.SendAsync(Request("/api/framework-auth/protected"))).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await client.SendAsync(Request("/api/framework-auth/protected", User("mario")))).StatusCode);
+
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.SendAsync(Request("/api/framework-auth/protected",
+                User("mario"),
+                Permission("read")))).StatusCode);
+    }
+
+    [Fact]
+    public async Task Framework_allow_anonymous_overrides_class_policy()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/framework-auth/public");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("\"public\"", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Require_authorization_by_default_requires_authentication()
+    {
+        await using WebApplication app = await StartAppAsync(
+            options => options.RequireAuthorizationByDefault = true,
+            TestAuthHandler.SchemeName);
+        var client = app.GetTestClient();
+
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await client.GetAsync("/api/values/plain")).StatusCode);
+
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.SendAsync(Request("/api/values/plain", User("mario")))).StatusCode);
+
+        // [DynamicAllowAnonymous] still opts out of the default requirement.
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.GetAsync("/api/auth/public")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Require_authorization_by_default_requires_authorization_services()
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddDynamicHttp(options =>
+        {
+            options.ScanAssemblies(typeof(AuthorizationService).Assembly);
+            options.RequireAuthorizationByDefault = true;
+        });
+
+        await using WebApplication app = builder.Build();
+
+        Assert.Throws<DynamicHttpConfigurationException>(() => app.MapDynamicHttp());
+    }
+
     private static HttpRequestMessage Request(string path, params (string Name, string Value)[] headers)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, path);
@@ -120,14 +186,19 @@ public sealed class AuthorizationTests
 
     private static (string Name, string Value) Permission(string permission) => ("X-Test-Permission", permission);
 
-    private static async Task<WebApplication> StartAppAsync()
+    private static async Task<WebApplication> StartAppAsync(
+        Action<DynamicHttpOptions>? configureOptions = null,
+        string defaultScheme = RejectingAuthHandler.SchemeName)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddDynamicHttp(options =>
-            options.ScanAssemblies(typeof(AuthorizationService).Assembly));
+        {
+            options.ScanAssemblies(typeof(AuthorizationService).Assembly);
+            configureOptions?.Invoke(options);
+        });
         builder.Services
-            .AddAuthentication(RejectingAuthHandler.SchemeName)
+            .AddAuthentication(defaultScheme)
             .AddScheme<AuthenticationSchemeOptions, TestAuthHandler>(TestAuthHandler.SchemeName, _ => { })
             .AddScheme<AuthenticationSchemeOptions, RejectingAuthHandler>(RejectingAuthHandler.SchemeName, _ => { });
         builder.Services.AddAuthorizationBuilder()
@@ -225,4 +296,16 @@ public sealed class RejectingAuthHandler(
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync() =>
         Task.FromResult(AuthenticateResult.NoResult());
+}
+
+[HttpService("/api/framework-auth")]
+[Authorize(Policy = "read", AuthenticationSchemes = TestAuthHandler.SchemeName)]
+public sealed class FrameworkAuthorizationService
+{
+    [HttpGet("/protected")]
+    public string Protected() => "protected";
+
+    [HttpGet("/public")]
+    [AllowAnonymous]
+    public string Public() => "public";
 }

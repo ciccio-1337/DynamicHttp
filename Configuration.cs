@@ -11,6 +11,27 @@ public sealed class DynamicHttpOptions
 
     public ServiceLifetime DefaultServiceLifetime { get; set; } = ServiceLifetime.Scoped;
 
+    /// <summary>
+    /// When true, endpoints without <c>[DynamicAuthorize]</c>, a framework <c>[Authorize]</c>
+    /// or an allow-anonymous marker (<c>[DynamicAllowAnonymous]</c>/<c>[AllowAnonymous]</c>)
+    /// require an authenticated user. Defaults to false to preserve the opt-in behavior of
+    /// previous versions; enable it in new services.
+    /// </summary>
+    public bool RequireAuthorizationByDefault { get; set; }
+
+    /// <summary>
+    /// When true (default), DataAnnotations validation attributes on parameters and on body
+    /// models are enforced after binding. Errors produce a 400 ProblemDetails response.
+    /// </summary>
+    public bool ValidateModels { get; set; } = true;
+
+    /// <summary>
+    /// Optional maximum request body size, in bytes, applied to every dynamic endpoint before
+    /// binding. Requests that exceed the limit are rejected with 413. When null, the server's
+    /// default limit applies.
+    /// </summary>
+    public long? MaxRequestBodyBytes { get; set; }
+
     public void ScanAssemblies(params Assembly[] assemblies)
     {
         foreach (var assembly in assemblies.Distinct())
@@ -31,6 +52,12 @@ public static class DynamicHttpServiceCollectionExtensions
         DynamicHttpOptions options = new();
 
         configure?.Invoke(options);
+
+        if (options.MaxRequestBodyBytes is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(configure),
+                "MaxRequestBodyBytes must be a positive number of bytes or null.");
+        }
 
         if (options.Assemblies.Count == 0)
         {

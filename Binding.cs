@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.ComponentModel.DataAnnotations;
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
@@ -24,6 +25,57 @@ internal static class DynamicHttpBinding
             BindingKind.Body => await BindBodyAsync(context, definition),
             _ => throw new ArgumentOutOfRangeException(nameof(definition.Kind))
         };
+    }
+
+    /// <summary>
+    /// Applies DataAnnotations validation to a bound argument. Parameter attributes are always
+    /// validated; object validation runs when the model declares validation metadata and the
+    /// application has not disabled it through <see cref="DynamicHttpOptions.ValidateModels"/>.
+    /// Error messages never include the raw request value.
+    /// </summary>
+    public static void Validate(object? value, ParameterDefinition definition,
+        IServiceProvider services, bool validateModels)
+    {
+        if (definition.ValidationAttributes.Count > 0)
+        {
+            // ValidationContext requires a non-null instance even when validating a null value.
+            var context = new ValidationContext(value ?? new object(), services, items: null)
+            {
+                MemberName = definition.Name
+            };
+            var results = new List<ValidationResult>();
+
+            if (!Validator.TryValidateValue(value, context, results, definition.ValidationAttributes))
+            {
+                throw new BadRequestHttpException(FormatErrors(definition.Name, results));
+            }
+        }
+
+        if (!validateModels || !definition.RequiresObjectValidation || value is null)
+        {
+            return;
+        }
+
+        var objectResults = new List<ValidationResult>();
+
+        if (!Validator.TryValidateObject(value,
+            new ValidationContext(value, services, items: null),
+            objectResults,
+            validateAllProperties: true))
+        {
+            throw new BadRequestHttpException(FormatErrors(definition.Name, objectResults));
+        }
+    }
+
+    private static string FormatErrors(string parameterName, IEnumerable<ValidationResult> results)
+    {
+        string messages = string.Join("; ", results
+            .Select(result => result.ErrorMessage)
+            .Where(message => !string.IsNullOrWhiteSpace(message)));
+
+        return messages.Length == 0
+            ? $"Parameter '{parameterName}' is not valid."
+            : $"Parameter '{parameterName}' is not valid: {messages}";
     }
 
     private static async ValueTask<object?> BindBodyAsync(HttpContext context, ParameterDefinition definition)
@@ -94,14 +146,23 @@ internal static class DynamicHttpBinding
 
         if (target.IsEnum)
         {
+            object parsed;
+
             try
             {
-                return Enum.Parse(target, value.ToString()!, ignoreCase: true);
+                parsed = Enum.Parse(target, value.ToString()!, ignoreCase: true);
             }
             catch (Exception exception) when (exception is ArgumentException or OverflowException)
             {
-                throw InvalidValue(definition, value, exception);
+                throw InvalidValue(definition, exception);
             }
+
+            if (!IsDefinedEnumValue(target, parsed))
+            {
+                throw InvalidValue(definition);
+            }
+
+            return parsed;
         }
 
         if (target == typeof(Guid))
@@ -112,7 +173,7 @@ internal static class DynamicHttpBinding
             }
             catch (FormatException exception)
             {
-                throw InvalidValue(definition, value, exception);
+                throw InvalidValue(definition, exception);
             }
         }
 
@@ -127,9 +188,43 @@ internal static class DynamicHttpBinding
                 return converted;
             }
 
-            throw InvalidValue(definition, value, exception);
+            throw InvalidValue(definition, exception);
         }
     }
+
+    /// <summary>
+    /// Enum.Parse accepts any numeric value that fits the underlying type, including values that
+    /// are not declared on the enum. Reject those so an endpoint cannot receive undefined states.
+    /// </summary>
+    private static bool IsDefinedEnumValue(Type enumType, object value)
+    {
+        if (!enumType.IsDefined(typeof(FlagsAttribute), inherit: false))
+        {
+            return Enum.IsDefined(enumType, value);
+        }
+
+        ulong allowed = 0;
+
+        foreach (object defined in Enum.GetValues(enumType))
+        {
+            allowed |= EnumBits(defined);
+        }
+
+        return (EnumBits(value) & ~allowed) == 0;
+    }
+
+    private static ulong EnumBits(object value) => value switch
+    {
+        sbyte number => unchecked((ulong)number),
+        byte number => number,
+        short number => unchecked((ulong)number),
+        ushort number => number,
+        int number => unchecked((ulong)number),
+        uint number => number,
+        long number => unchecked((ulong)number),
+        ulong number => number,
+        _ => throw new ArgumentException("Unsupported enum underlying type.", nameof(value))
+    };
 
     private static bool TryConvertWithTypeConverter(object value, Type target, out object? converted)
     {
@@ -164,6 +259,7 @@ internal static class DynamicHttpBinding
         }
     }
 
-    private static BadRequestHttpException InvalidValue(ParameterDefinition definition, object value, Exception innerException) =>
-        new($"The value '{value}' for parameter '{definition.Name}' is not valid.", innerException);
+    private static BadRequestHttpException InvalidValue(ParameterDefinition definition, Exception? innerException = null) =>
+        new($"The value for parameter '{definition.Name}' is not valid for type '{definition.ParameterType.Name}'.",
+            innerException ?? new FormatException("The value could not be converted."));
 }
