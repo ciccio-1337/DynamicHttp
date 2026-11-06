@@ -45,12 +45,23 @@ public sealed class DevAuthHandler : AuthenticationHandler<DevAuthOptions>
             return Task.FromResult(AuthenticateResult.NoResult());
         }
 
-        IPAddress? remote = Context.Connection.RemoteIpAddress;
-
-        if (!_allowRemote && remote is not null && !IPAddress.IsLoopback(remote))
+        if (!_allowRemote)
         {
-            return Task.FromResult(AuthenticateResult.Fail(
-                "Development authentication is restricted to loopback requests."));
+            IPAddress? remote = Context.Connection.RemoteIpAddress;
+
+            // Fail closed when the server does not expose a remote address. A local reverse
+            // proxy or DNS rebinding can otherwise make a non-local request look local.
+            if (remote is null || !IPAddress.IsLoopback(remote))
+            {
+                return Task.FromResult(AuthenticateResult.Fail(
+                    "Development authentication is restricted to loopback requests."));
+            }
+
+            if (!IsLoopbackHost(Request.Host.Host))
+            {
+                return Task.FromResult(AuthenticateResult.Fail(
+                    "Development authentication requires a loopback Host header."));
+            }
         }
 
         string? user = Request.Headers[HeaderName].FirstOrDefault();
@@ -75,5 +86,28 @@ public sealed class DevAuthHandler : AuthenticationHandler<DevAuthOptions>
 
         return Task.FromResult(AuthenticateResult.Success(
             new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name)));
+    }
+
+    private static bool IsLoopbackHost(string? host)
+    {
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return false;
+        }
+
+        if (string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        string candidate = host;
+
+        if (candidate.Length > 1 && candidate[0] == '[' && candidate[^1] == ']')
+        {
+            candidate = candidate[1..^1];
+        }
+
+        return IPAddress.TryParse(candidate, out IPAddress? address) &&
+            IPAddress.IsLoopback(address);
     }
 }

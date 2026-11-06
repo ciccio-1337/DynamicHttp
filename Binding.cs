@@ -60,12 +60,10 @@ internal static class DynamicHttpBinding
             return;
         }
 
-        var objectResults = new List<ValidationResult>();
+        IReadOnlyList<ValidationResult> objectResults =
+            DynamicHttpValidation.Validate(value, services);
 
-        if (!Validator.TryValidateObject(value,
-            new ValidationContext(value, services, items: null),
-            objectResults,
-            validateAllProperties: true))
+        if (objectResults.Count > 0)
         {
             throw new BadRequestHttpException(FormatErrors(definition.Name, objectResults));
         }
@@ -74,8 +72,16 @@ internal static class DynamicHttpBinding
     private static string FormatErrors(string parameterName, IEnumerable<ValidationResult> results)
     {
         string messages = string.Join("; ", results
-            .Select(result => result.ErrorMessage)
-            .Where(message => !string.IsNullOrWhiteSpace(message)));
+            .Where(result => !string.IsNullOrWhiteSpace(result.ErrorMessage))
+            .Select(result =>
+            {
+                string? member = result.MemberNames
+                    .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
+
+                return string.IsNullOrEmpty(member)
+                    ? result.ErrorMessage
+                    : $"{member}: {result.ErrorMessage}";
+            }));
 
         return messages.Length == 0
             ? $"Parameter '{parameterName}' is not valid."
@@ -214,14 +220,40 @@ internal static class DynamicHttpBinding
             return Enum.IsDefined(enumType, value);
         }
 
+        // Accept any value that is declared exactly. This includes a negative sentinel such as
+        // "All = -1", which would otherwise act as a wildcard for every bit combination.
+        if (Enum.IsDefined(enumType, value))
+        {
+            return true;
+        }
+
         ulong allowed = 0;
 
         foreach (object defined in Enum.GetValues(enumType))
         {
-            allowed |= EnumBits(defined);
+            // Negative sentinels must not widen the mask to every bit. They remain accepted only
+            // through the exact-match check above.
+            if (!IsNegativeEnumValue(defined))
+            {
+                allowed |= EnumBits(defined);
+            }
         }
 
+        // Undefined combinations are accepted only when every bit is part of a declared,
+        // non-negative flag.
         return (EnumBits(value) & ~allowed) == 0;
+    }
+
+    private static bool IsNegativeEnumValue(object value)
+    {
+        Type underlying = Enum.GetUnderlyingType(value.GetType());
+
+        return Type.GetTypeCode(underlying) switch
+        {
+            TypeCode.SByte or TypeCode.Int16 or TypeCode.Int32 or TypeCode.Int64 =>
+                Convert.ToInt64(value, CultureInfo.InvariantCulture) < 0,
+            _ => false
+        };
     }
 
     private static ulong EnumBits(object value)

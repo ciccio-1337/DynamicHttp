@@ -1,5 +1,7 @@
+using System.Globalization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Logging;
 
 namespace DynamicHttp;
@@ -34,7 +36,13 @@ public abstract class HttpException : Exception, IHttpException
 
     public abstract int StatusCode { get; }
     public abstract string Title { get; }
+
+    /// <summary>
+    /// Client-visible detail returned in the ProblemDetails response. Never put secrets,
+    /// credentials or internal implementation data in this message.
+    /// </summary>
     public string? Detail => Message;
+
     public abstract string? Type { get; }
 }
 
@@ -92,6 +100,13 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
             string? detail;
             string? type;
 
+            // Prefer the route template over the concrete request path: paths can contain
+            // tokens, PII or other attacker-controlled values. Method and trace id are
+            // sanitized as well because they can be influenced by the client/proxy.
+            string method = SanitizeForLog(context.Request.Method);
+            string path = GetLogPath(context);
+            string traceId = SanitizeForLog(context.TraceIdentifier);
+
             if (typed is not null)
             {
                 statusCode = typed.StatusCode;
@@ -103,8 +118,8 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
                 // values (log injection) or sensitive data copied from the request.
                 logger.LogInformation(
                     "DynamicHttp request failed for {Method} {Path} with status code {StatusCode}",
-                    context.Request.Method,
-                    SanitizeForLog(context.Request.Path.Value),
+                    method,
+                    path,
                     statusCode);
             }
             else if (exception is BadHttpRequestException badRequest)
@@ -118,8 +133,8 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
 
                 logger.LogInformation(
                     "DynamicHttp request failed for {Method} {Path} with status code {StatusCode}",
-                    context.Request.Method,
-                    SanitizeForLog(context.Request.Path.Value),
+                    method,
+                    path,
                     statusCode);
             }
             else
@@ -135,9 +150,9 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
                     // only log here when the exception did not come from a mapped endpoint.
                     logger.LogError(exception,
                         "Unhandled DynamicHttp exception for {Method} {Path}. TraceId: {TraceId}",
-                        context.Request.Method,
-                        SanitizeForLog(context.Request.Path.Value),
-                        context.TraceIdentifier);
+                        method,
+                        path,
+                        traceId);
                 }
             }
 
@@ -168,9 +183,26 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
         {
             for (int i = 0; i < source.Length; i++)
             {
-                span[i] = char.IsControl(source[i]) ? '?' : source[i];
+                UnicodeCategory category = char.GetUnicodeCategory(source[i]);
+
+                span[i] = char.IsControl(source[i]) ||
+                    category is UnicodeCategory.Format or
+                        UnicodeCategory.LineSeparator or
+                        UnicodeCategory.ParagraphSeparator
+                    ? '?'
+                    : source[i];
             }
         });
+    }
+
+    private static string GetLogPath(HttpContext context)
+    {
+        if (context.GetEndpoint() is RouteEndpoint { RoutePattern.RawText: { Length: > 0 } route })
+        {
+            return SanitizeForLog(route);
+        }
+
+        return SanitizeForLog(context.Request.Path.Value);
     }
 
     private static string TitleFor(int statusCode) => statusCode switch

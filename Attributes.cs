@@ -81,7 +81,8 @@ public sealed class FromBodyAttribute : Attribute;
 [AttributeUsage(AttributeTargets.Parameter)]
 public sealed class FromServicesAttribute : Attribute;
 
-[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = true, Inherited = true)]
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method | AttributeTargets.Interface,
+    AllowMultiple = true, Inherited = true)]
 public sealed class DynamicAuthorizeAttribute : Attribute
 {
     public string? Policy { get; init; }
@@ -89,7 +90,8 @@ public sealed class DynamicAuthorizeAttribute : Attribute
     public string? AuthenticationSchemes { get; init; }
 }
 
-[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = false, Inherited = true)]
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method | AttributeTargets.Interface,
+    AllowMultiple = false, Inherited = true)]
 public sealed class DynamicAllowAnonymousAttribute : Attribute;
 
 /// <summary>

@@ -1,6 +1,7 @@
 using System.ComponentModel.DataAnnotations;
 using DynamicHttp.Tests.Fixtures;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Xunit;
 
 namespace DynamicHttp.Tests;
@@ -242,6 +243,43 @@ public sealed class DiscoveryTests
             DynamicHttpDiscovery.BuildParameters(typeof(MvcBindingService), method));
 
         Assert.Contains("framework binding attribute", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BindNever_on_body_model_property_throws_configuration_error()
+    {
+        var method = typeof(BindNeverBodyService)
+            .GetMethod(nameof(BindNeverBodyService.Post))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(BindNeverBodyService), method));
+
+        Assert.Contains("BindNever", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Secret", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BindNever_on_nested_collection_property_throws_configuration_error()
+    {
+        var method = typeof(BindNeverCollectionService)
+            .GetMethod(nameof(BindNeverCollectionService.Post))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(BindNeverCollectionService), method));
+
+        Assert.Contains("Items[].Secret", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BindNever_on_parameter_throws_configuration_error()
+    {
+        var method = typeof(BindNeverParameterService)
+            .GetMethod(nameof(BindNeverParameterService.Get))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(BindNeverParameterService), method));
+
+        Assert.Contains("BindNever", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -528,6 +566,38 @@ public sealed class DiscoveryTests
     private sealed class MvcBindingService
     {
         public string Get([Microsoft.AspNetCore.Mvc.FromQuery] string value) => value;
+    }
+
+    private sealed class BindNeverBodyService
+    {
+        public string Post([FromBody] BindNeverBody body) => body.Secret;
+    }
+
+    private sealed class BindNeverBody
+    {
+        [BindNever]
+        public string Secret { get; set; } = string.Empty;
+    }
+
+    private sealed class BindNeverCollectionService
+    {
+        public string Post([FromBody] BindNeverCollectionBody body) => body.Items.Count.ToString();
+    }
+
+    private sealed class BindNeverCollectionBody
+    {
+        public List<BindNeverItem> Items { get; set; } = [];
+    }
+
+    private sealed class BindNeverItem
+    {
+        [BindNever]
+        public string Secret { get; set; } = string.Empty;
+    }
+
+    private sealed class BindNeverParameterService
+    {
+        public string Get([BindNever] string value) => value;
     }
 
     [HttpService("/api/antiforgery")]

@@ -9,6 +9,7 @@ public sealed class DynamicHttpOptions
 {
     private ServiceLifetime _defaultServiceLifetime = ServiceLifetime.Scoped;
     private bool _requireAuthorizationByDefault;
+    private bool _requireAntiforgeryByDefault;
     private bool _validateModels = true;
     private long? _maxRequestBodyBytes;
 
@@ -37,6 +38,23 @@ public sealed class DynamicHttpOptions
         {
             _requireAuthorizationByDefault = value;
             RequireAuthorizationByDefaultSet = true;
+        }
+    }
+
+    /// <summary>
+    /// When true, every endpoint whose HTTP method is not GET, HEAD, OPTIONS or TRACE requires
+    /// a valid antiforgery token, even without <c>[DynamicAntiforgery]</c>. Defaults to false.
+    /// Register <c>AddAntiforgery()</c>; the check fails closed when antiforgery services are
+    /// missing. An explicit <c>[DynamicAntiforgery]</c> is always honored, including on safe
+    /// methods such as GET.
+    /// </summary>
+    public bool RequireAntiforgeryByDefault
+    {
+        get => _requireAntiforgeryByDefault;
+        set
+        {
+            _requireAntiforgeryByDefault = value;
+            RequireAntiforgeryByDefaultSet = true;
         }
     }
 
@@ -72,6 +90,7 @@ public sealed class DynamicHttpOptions
 
     internal bool DefaultServiceLifetimeSet { get; private set; }
     internal bool RequireAuthorizationByDefaultSet { get; private set; }
+    internal bool RequireAntiforgeryByDefaultSet { get; private set; }
     internal bool ValidateModelsSet { get; private set; }
     internal bool MaxRequestBodyBytesSet { get; private set; }
 
@@ -168,6 +187,17 @@ public static class DynamicHttpServiceCollectionExtensions
             }
 
             existing.RequireAuthorizationByDefault = options.RequireAuthorizationByDefault;
+        }
+
+        if (options.RequireAntiforgeryByDefaultSet)
+        {
+            if (existing.RequireAntiforgeryByDefaultSet &&
+                existing.RequireAntiforgeryByDefault != options.RequireAntiforgeryByDefault)
+            {
+                throw OptionConflict(nameof(DynamicHttpOptions.RequireAntiforgeryByDefault));
+            }
+
+            existing.RequireAntiforgeryByDefault = options.RequireAntiforgeryByDefault;
         }
 
         if (options.ValidateModelsSet)

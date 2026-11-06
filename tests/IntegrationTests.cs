@@ -837,6 +837,186 @@ public sealed class IntegrationTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("\"antiforgery\"", await response.Content.ReadAsStringAsync());
     }
+
+    [Fact]
+    public async Task Antiforgery_attribute_validates_safe_get_methods()
+    {
+        await using WebApplication app = await StartAntiforgeryAppAsync();
+        var client = app.GetTestClient();
+
+        var missing = await client.GetAsync("/api/values/antiforgery-get");
+        Assert.Equal(HttpStatusCode.BadRequest, missing.StatusCode);
+
+        (string token, string cookie) = await GetAntiforgeryTokenAsync(client);
+        using var request = new HttpRequestMessage(System.Net.Http.HttpMethod.Get,
+            "/api/values/antiforgery-get");
+        request.Headers.Add("RequestVerificationToken", token);
+        request.Headers.Add("Cookie", cookie);
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("\"antiforgery-get\"", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Antiforgery_attribute_validates_custom_verbs()
+    {
+        await using WebApplication app = await StartAntiforgeryAppAsync();
+        var client = app.GetTestClient();
+
+        using var missing = new HttpRequestMessage(
+            new System.Net.Http.HttpMethod("PROPFIND"), "/api/values/antiforgery-custom");
+        Assert.Equal(HttpStatusCode.BadRequest, (await client.SendAsync(missing)).StatusCode);
+
+        (string token, string cookie) = await GetAntiforgeryTokenAsync(client);
+        using var request = new HttpRequestMessage(
+            new System.Net.Http.HttpMethod("PROPFIND"), "/api/values/antiforgery-custom");
+        request.Headers.Add("RequestVerificationToken", token);
+        request.Headers.Add("Cookie", cookie);
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("\"antiforgery-custom\"", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task RequireAntiforgeryByDefault_protects_unsafe_methods_only()
+    {
+        await using WebApplication app = await StartAntiforgeryAppAsync(
+            options => options.RequireAntiforgeryByDefault = true);
+        var client = app.GetTestClient();
+
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.GetAsync("/api/values/plain")).StatusCode);
+
+        var missing = await client.PostAsync("/api/values/body",
+            new StringContent("""{"name":"mario","age":42}""", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, missing.StatusCode);
+
+        (string token, string cookie) = await GetAntiforgeryTokenAsync(client);
+        using var request = new HttpRequestMessage(System.Net.Http.HttpMethod.Post,
+            "/api/values/body")
+        {
+            Content = new StringContent("""{"name":"mario","age":42}""",
+                Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("RequestVerificationToken", token);
+        request.Headers.Add("Cookie", cookie);
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Antiforgery_endpoint_rejects_oversized_body_before_parsing()
+    {
+        await using WebApplication app = await StartAntiforgeryAppAsync(
+            options => options.MaxRequestBodyBytes = 8);
+        var client = app.GetTestClient();
+
+        var response = await client.PostAsync("/api/values/antiforgery",
+            new StringContent("a=123456789", Encoding.UTF8,
+                "application/x-www-form-urlencoded"));
+
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Nested_body_model_validation_is_recursive()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var invalid = await client.PostAsync("/api/values/nestedbody",
+            new StringContent("""{"name":"order","child":{"price":0}}""",
+                Encoding.UTF8, "application/json"));
+        string body = await invalid.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        Assert.Contains("Child.Price", body, StringComparison.Ordinal);
+
+        var valid = await client.PostAsync("/api/values/nestedbody",
+            new StringContent("""{"name":"order","child":{"price":5}}""",
+                Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+    }
+
+    [Fact]
+    public async Task Body_collection_validation_is_recursive()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var invalid = await client.PostAsync("/api/values/collectionbody",
+            new StringContent("""{"lines":[{"price":0}]}""",
+                Encoding.UTF8, "application/json"));
+        string body = await invalid.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        Assert.Contains("Lines[0].Price", body, StringComparison.Ordinal);
+
+        var valid = await client.PostAsync("/api/values/collectionbody",
+            new StringContent("""{"lines":[{"price":5}]}""",
+                Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("999", HttpStatusCode.BadRequest)]
+    [InlineData("-1", HttpStatusCode.OK)]
+    [InlineData("Read", HttpStatusCode.OK)]
+    public async Task Flags_enum_with_negative_sentinel_is_strict(
+        string value, HttpStatusCode expected)
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync($"/api/values/flagsall/{value}");
+
+        Assert.Equal(expected, response.StatusCode);
+    }
+
+    private static async Task<WebApplication> StartAntiforgeryAppAsync(
+        Action<DynamicHttpOptions>? configureOptions = null)
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddAntiforgery();
+        builder.Services.AddDynamicHttp(options =>
+        {
+            options.ScanAssemblies(typeof(ValuesService).Assembly);
+            configureOptions?.Invoke(options);
+        });
+
+        WebApplication app = builder.Build();
+        app.UseRouting();
+        app.UseDynamicHttpExceptionHandling();
+        app.UseAntiforgery();
+        app.MapDynamicHttp();
+        app.MapGet("/antiforgery-token", (HttpContext context, IAntiforgery antiforgery) =>
+        {
+            var tokens = antiforgery.GetAndStoreTokens(context);
+            return Results.Text(tokens.RequestToken);
+        });
+        await app.StartAsync();
+
+        return app;
+    }
+
+    private static async Task<(string Token, string Cookie)> GetAntiforgeryTokenAsync(
+        HttpClient client)
+    {
+        var response = await client.GetAsync("/antiforgery-token");
+        string token = await response.Content.ReadAsStringAsync();
+        string cookie = response.Headers.GetValues("Set-Cookie").First().Split(';')[0];
+
+        return (token, cookie);
+    }
 }
 
 [HttpService("/api/values")]
@@ -952,6 +1132,24 @@ public sealed class ValuesService
     [DynamicAntiforgery]
     public string Antiforgery() => "antiforgery";
 
+    [HttpGet("/antiforgery-get")]
+    [DynamicAntiforgery]
+    public string AntiforgeryGet() => "antiforgery-get";
+
+    [HttpPropFind("/antiforgery-custom")]
+    [DynamicAntiforgery]
+    public string AntiforgeryCustom() => "antiforgery-custom";
+
+    [HttpPost("/nestedbody")]
+    public IResult NestedBody([FromBody] NestedBodyRequest request) => Results.Ok(request);
+
+    [HttpPost("/collectionbody")]
+    public IResult CollectionBody([FromBody] CollectionBodyRequest request) => Results.Ok(request);
+
+    [HttpGet("/notfound/{token}")]
+    public string NotFoundWithToken([FromRoute] string token) =>
+        throw new NotFoundHttpException("missing");
+
     [HttpGet("/emptynullable")]
     public string EmptyNullable([FromQuery] int? page) =>
         page?.ToString(CultureInfo.InvariantCulture) ?? "<null>";
@@ -981,6 +1179,9 @@ public sealed class ValuesService
 
     [HttpGet("/flags/{permissions}")]
     public string Flags([FromRoute] Permissions permissions) => permissions.ToString();
+
+    [HttpGet("/flagsall/{permissions}")]
+    public string FlagsAll([FromRoute] PermissionsWithAll permissions) => permissions.ToString();
 
     [HttpGet("/time/{t}")]
     public string TimeRoute([FromRoute] TimeSpan t) => t.ToString();
@@ -1013,6 +1214,15 @@ public enum Color { Red, Green, Blue }
 [Flags]
 public enum Permissions { None = 0, Read = 1, Write = 2, Execute = 4 }
 
+[Flags]
+public enum PermissionsWithAll { None = 0, Read = 1, Write = 2, Execute = 4, All = -1 }
+
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class HttpPropFindAttribute(string template = "") : HttpMethodAttribute(template)
+{
+    public override string Method => "PROPFIND";
+}
+
 public sealed class MissingServiceDependency
 {
     public string Value => "missing-service";
@@ -1030,6 +1240,31 @@ public sealed class ScopedProbeService
 public sealed record BodyRequest(string Name, int Age);
 
 public sealed record ValidatedBodyRequest([property: Required] string Name);
+
+public sealed class NestedBodyRequest
+{
+    [Required]
+    public string Name { get; set; } = string.Empty;
+
+    public NestedBodyChild Child { get; set; } = new();
+}
+
+public sealed class NestedBodyChild
+{
+    [Range(1, 100)]
+    public int Price { get; set; }
+}
+
+public sealed class CollectionBodyRequest
+{
+    public List<CollectionBodyLine> Lines { get; set; } = [];
+}
+
+public sealed class CollectionBodyLine
+{
+    [Range(1, 100)]
+    public int Price { get; set; }
+}
 
 public sealed class CustomTask<T>(T result) : Task<T>(() => result)
 {

@@ -34,6 +34,8 @@ public sealed class ExceptionHandlerTests
     [Theory]
     [InlineData("/api/values/\r\nInjected", "/api/values/??Injected")]
     [InlineData("/api/values/\tTab", "/api/values/?Tab")]
+    [InlineData("/api/values/\u2028Line", "/api/values/?Line")]
+    [InlineData("/api/values/\u202EParagraph", "/api/values/?Paragraph")]
     public void Log_path_sanitizes_control_characters(string input, string expected)
     {
         Assert.Equal(expected, DynamicHttpExceptionHandler.SanitizeForLog(input));

@@ -170,6 +170,43 @@ public sealed class ConfigurationTests
 
         Assert.Equal(12, options.MaxRequestBodyBytes);
     }
+
+    [Fact]
+    public void AddDynamicHttp_rejects_conflicting_antiforgery_defaults()
+    {
+        var services = new ServiceCollection();
+
+        services.AddDynamicHttp(options =>
+        {
+            options.ScanAssemblies(typeof(ValuesService).Assembly);
+            options.RequireAntiforgeryByDefault = true;
+        });
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            services.AddDynamicHttp(options =>
+            {
+                options.ScanAssemblies(typeof(ValuesService).Assembly);
+                options.RequireAntiforgeryByDefault = false;
+            }));
+
+        Assert.Contains(nameof(DynamicHttpOptions.RequireAntiforgeryByDefault),
+            exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddDynamicHttp_merges_antiforgery_default_set_later()
+    {
+        var services = new ServiceCollection();
+
+        services.AddDynamicHttp(options =>
+            options.ScanAssemblies(typeof(ValuesService).Assembly));
+        services.AddDynamicHttp(options => options.RequireAntiforgeryByDefault = true);
+
+        using var provider = services.BuildServiceProvider();
+        var options = provider.GetRequiredService<DynamicHttpOptions>();
+
+        Assert.True(options.RequireAntiforgeryByDefault);
+    }
 }
 
 public sealed class AwaitingTests

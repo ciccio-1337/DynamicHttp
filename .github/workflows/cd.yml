@@ -3,17 +3,23 @@ name: CD
 on:
   release:
     types: [published]
-    
+
+permissions:
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Configure protection rules (required reviewers, restricted branches) for this environment
+    # in the repository settings before publishing a release.
+    environment: release
     permissions:
       contents: read
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: '10.x'
       - run: dotnet restore
@@ -26,7 +32,7 @@ jobs:
             --api-key ${{ secrets.GITHUB_TOKEN }} \
             --username ${{ github.repository_owner }} \
             --skip-duplicate
-      - uses: NuGet/login@v1
+      - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: nuget-login
         with:
           # Must be the nuget.org account name, not the GitHub owner. Store it as a repository

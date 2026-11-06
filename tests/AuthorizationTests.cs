@@ -186,6 +186,66 @@ public sealed class AuthorizationTests
     }
 
     [Fact]
+    public async Task Interface_type_level_authorization_is_enforced()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await client.SendAsync(Request("/api/interface-auth/protected"))).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await client.SendAsync(Request("/api/interface-auth/protected",
+                User("mario")))).StatusCode);
+
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.SendAsync(Request("/api/interface-auth/protected",
+                User("mario"),
+                Permission("read")))).StatusCode);
+    }
+
+    [Fact]
+    public async Task Interface_method_level_authorization_is_enforced()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await client.SendAsync(Request("/api/interface-method-auth/protected"))).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await client.SendAsync(Request("/api/interface-method-auth/protected",
+                User("mario")))).StatusCode);
+
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.SendAsync(Request("/api/interface-method-auth/protected",
+                User("mario"),
+                Role("Admin")))).StatusCode);
+    }
+
+    [Fact]
+    public void Interface_method_authorize_with_class_allow_anonymous_throws()
+    {
+        var method = typeof(InterfaceMethodAuthorizeAndClassAnonymous)
+            .GetMethod(nameof(InterfaceMethodAuthorizeAndClassAnonymous.Get))!;
+
+        Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateAuthorization(
+                typeof(InterfaceMethodAuthorizeAndClassAnonymous), method));
+    }
+
+    [Fact]
+    public void Interface_type_authorize_with_class_allow_anonymous_throws()
+    {
+        var method = typeof(InterfaceTypeAuthorizeAndClassAnonymous)
+            .GetMethod(nameof(InterfaceTypeAuthorizeAndClassAnonymous.Get))!;
+
+        Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateAuthorization(
+                typeof(InterfaceTypeAuthorizeAndClassAnonymous), method));
+    }
+
+    [Fact]
     public async Task Require_authorization_by_default_requires_authorization_services()
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
@@ -354,4 +414,55 @@ public sealed class FrameworkAnonymousClassService
 {
     [HttpGet]
     public string Get() => "anon-class";
+}
+
+[DynamicAuthorize(Policy = "read", AuthenticationSchemes = TestAuthHandler.SchemeName)]
+public interface IInterfaceAuthorizedService
+{
+    string Get();
+}
+
+[HttpService("/api/interface-auth")]
+public sealed class InterfaceAuthorizedService : IInterfaceAuthorizedService
+{
+    [HttpGet("/protected")]
+    public string Get() => "protected";
+}
+
+public interface IInterfaceMethodAuthorizedService
+{
+    [DynamicAuthorize(Roles = "Admin",
+        AuthenticationSchemes = TestAuthHandler.SchemeName)]
+    string Get();
+}
+
+[HttpService("/api/interface-method-auth")]
+public sealed class InterfaceMethodAuthorizedService : IInterfaceMethodAuthorizedService
+{
+    [HttpGet("/protected")]
+    public string Get() => "protected";
+}
+
+public interface IInterfaceMethodAuthorize
+{
+    [DynamicAuthorize(Policy = "p")]
+    string Get();
+}
+
+public sealed class InterfaceMethodAuthorizeAndClassAnonymous : IInterfaceMethodAuthorize
+{
+    [DynamicAllowAnonymous]
+    public string Get() => "x";
+}
+
+[DynamicAuthorize(Policy = "p")]
+public interface IInterfaceTypeAuthorize
+{
+    string Get();
+}
+
+[DynamicAllowAnonymous]
+public sealed class InterfaceTypeAuthorizeAndClassAnonymous : IInterfaceTypeAuthorize
+{
+    public string Get() => "x";
 }

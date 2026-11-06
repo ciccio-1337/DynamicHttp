@@ -63,6 +63,24 @@ public sealed class LoggingTests
     }
 
     [Fact]
+    public async Task Request_path_values_are_not_logged_when_a_route_template_exists()
+    {
+        var provider = new CapturingLoggerProvider();
+        await using WebApplication app = await StartAppAsync(provider);
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/notfound/supersecret-token");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.DoesNotContain(provider.Records,
+            record => record.Message.Contains("DynamicHttp", StringComparison.Ordinal) &&
+                record.Message.Contains("supersecret-token", StringComparison.Ordinal));
+        Assert.Contains(provider.Records,
+            record => record.Message.Contains("DynamicHttp request failed", StringComparison.Ordinal) &&
+                record.Message.Contains("/api/values/notfound/{token}", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Client_disconnect_is_not_logged_as_an_error()
     {
         var provider = new CapturingLoggerProvider();

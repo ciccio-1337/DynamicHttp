@@ -29,6 +29,8 @@ public sealed class DynamicHttpRegistry
 
     internal bool RequireAuthorizationByDefault => _options.RequireAuthorizationByDefault;
 
+    internal bool RequireAntiforgeryByDefault => _options.RequireAntiforgeryByDefault;
+
     internal bool ValidateModels => _options.ValidateModels;
 
     internal long? MaxRequestBodyBytes => _options.MaxRequestBodyBytes;
@@ -80,13 +82,19 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
 
                     try
                     {
-                        if (definition.RequireAntiforgery &&
-                            IsStateChangingMethod(definition.HttpMethod))
+                        // Enforce the body limit first: antiforgery may read a form body, so an
+                        // oversized request must be rejected before any body parsing happens.
+                        EnforceRequestBodyLimit(context, registry.MaxRequestBodyBytes);
+
+                        // An explicit [DynamicAntiforgery] always validates, even on a safe method
+                        // such as GET: the developer deliberately opted in. The option only infers
+                        // the requirement for methods that can change state.
+                        if (definition.RequireAntiforgery ||
+                            (registry.RequireAntiforgeryByDefault &&
+                                !IsSafeMethod(definition.HttpMethod)))
                         {
                             await ValidateAntiforgeryAsync(context);
                         }
-
-                        EnforceRequestBodyLimit(context, registry.MaxRequestBodyBytes);
 
                         object?[] arguments = new object?[definition.Parameters.Count];
 
@@ -215,20 +223,160 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
 
         if (context.Request.ContentLength > maxRequestBodyBytes)
         {
-            throw new PayloadTooLargeHttpException(
-                $"The request body exceeds the configured limit of {maxRequestBodyBytes} bytes.");
+            throw PayloadTooLarge(maxRequestBodyBytes);
         }
 
-        // Enforce the same limit for chunked bodies, where Content-Length is absent.
-        if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } feature)
+        IHttpMaxRequestBodySizeFeature? feature =
+            context.Features.Get<IHttpMaxRequestBodySizeFeature>();
+
+        if (feature is { IsReadOnly: false })
         {
-            feature.MaxRequestBodySize = maxRequestBodyBytes;
+            // Never raise a limit that the server has already configured lower than ours.
+            long current = feature.MaxRequestBodySize ?? long.MaxValue;
+            feature.MaxRequestBodySize = Math.Min(current, maxRequestBodyBytes);
+
+            return;
+        }
+
+        // The server feature is absent or read-only. For a chunked body the declared length is
+        // unknown, so wrap the stream and count bytes as they are read. Keep a lower server-side
+        // limit if the read-only feature exposes one.
+        if (context.Request.ContentLength is null)
+        {
+            long effectiveLimit = feature?.MaxRequestBodySize is long serverLimit
+                ? Math.Min(serverLimit, maxRequestBodyBytes)
+                : maxRequestBodyBytes;
+
+            context.Request.Body = new LimitedReadStream(context.Request.Body, effectiveLimit);
         }
     }
 
-    private static bool IsStateChangingMethod(string httpMethod) =>
-        HttpMethods.IsPost(httpMethod) ||
-        HttpMethods.IsPut(httpMethod) ||
-        HttpMethods.IsPatch(httpMethod) ||
-        HttpMethods.IsDelete(httpMethod);
+    private static bool IsSafeMethod(string httpMethod) =>
+        HttpMethods.IsGet(httpMethod) ||
+        HttpMethods.IsHead(httpMethod) ||
+        HttpMethods.IsOptions(httpMethod) ||
+        HttpMethods.IsTrace(httpMethod);
+
+    private static PayloadTooLargeHttpException PayloadTooLarge(long maxRequestBodyBytes) =>
+        new($"The request body exceeds the configured limit of {maxRequestBodyBytes} bytes.");
+
+    /// <summary>
+    /// Counts bytes read from a request body and rejects the request when the configured limit
+    /// is exceeded. Used when the server cannot enforce the limit through
+    /// <see cref="IHttpMaxRequestBodySizeFeature"/>.
+    /// </summary>
+    private sealed class LimitedReadStream(Stream inner, long limit) : Stream
+    {
+        private long _bytesRead;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            Count(inner.Read(buffer, offset, Clamp(count)));
+
+        public override int Read(Span<byte> buffer) =>
+            Count(inner.Read(buffer[..Clamp(buffer.Length)]));
+
+        public override int ReadByte()
+        {
+            Span<byte> buffer = stackalloc byte[1];
+            int read = inner.Read(buffer);
+
+            return read == 0 ? -1 : CountByte(buffer[0]);
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer,
+            CancellationToken cancellationToken = default) =>
+            ReadAsyncCore(buffer, cancellationToken);
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count,
+            CancellationToken cancellationToken) =>
+            ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+
+        public override void Flush() { }
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                inner.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        private async ValueTask<int> ReadAsyncCore(Memory<byte> buffer,
+            CancellationToken cancellationToken)
+        {
+            int read = await inner.ReadAsync(buffer[..Clamp(buffer.Length)], cancellationToken)
+                .ConfigureAwait(false);
+
+            return Count(read);
+        }
+
+        private int Count(int read)
+        {
+            if (read <= 0)
+            {
+                return read;
+            }
+
+            _bytesRead += read;
+
+            if (_bytesRead > limit)
+            {
+                throw PayloadTooLarge(limit);
+            }
+
+            return read;
+        }
+
+        private int CountByte(byte value)
+        {
+            _bytesRead++;
+
+            if (_bytesRead > limit)
+            {
+                throw PayloadTooLarge(limit);
+            }
+
+            return value;
+        }
+
+        private int Clamp(int requested)
+        {
+            if (requested <= 0)
+            {
+                return 0;
+            }
+
+            long remaining = limit - _bytesRead;
+
+            if (remaining < 0)
+            {
+                throw PayloadTooLarge(limit);
+            }
+
+            // Read at most one byte past the limit so the overflow is detected without
+            // buffering an arbitrarily large chunk.
+            return (int)Math.Min(requested, remaining + 1);
+        }
+    }
 }

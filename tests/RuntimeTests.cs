@@ -41,6 +41,52 @@ public sealed class RuntimeTests
         Assert.Null(feature.MaxRequestBodySize);
     }
 
+    [Fact]
+    public async Task Body_limit_wraps_a_read_only_chunked_body()
+    {
+        var context = new DefaultHttpContext();
+        var feature = new TestMaxRequestBodySizeFeature { IsReadOnly = true };
+        context.Features.Set<IHttpMaxRequestBodySizeFeature>(feature);
+        context.Request.ContentLength = null;
+        context.Request.Body = new MemoryStream(new byte[20]);
+
+        DynamicHttpEndpointRouteBuilderExtensions.EnforceRequestBodyLimit(context, 8);
+
+        await Assert.ThrowsAsync<PayloadTooLargeHttpException>(async () =>
+        {
+            int read = await context.Request.Body.ReadAsync(new byte[20]);
+            Assert.True(read > 0);
+        });
+    }
+
+    [Fact]
+    public async Task Wrapped_body_reads_values_within_the_limit()
+    {
+        var context = new DefaultHttpContext();
+        var feature = new TestMaxRequestBodySizeFeature { IsReadOnly = true };
+        context.Features.Set<IHttpMaxRequestBodySizeFeature>(feature);
+        context.Request.ContentLength = null;
+        context.Request.Body = new MemoryStream(new byte[8]);
+
+        DynamicHttpEndpointRouteBuilderExtensions.EnforceRequestBodyLimit(context, 8);
+
+        int read = await context.Request.Body.ReadAsync(new byte[16]);
+
+        Assert.Equal(8, read);
+    }
+
+    [Fact]
+    public void Body_limit_does_not_raise_a_lower_server_limit()
+    {
+        var context = new DefaultHttpContext();
+        var feature = new TestMaxRequestBodySizeFeature { MaxRequestBodySize = 4 };
+        context.Features.Set<IHttpMaxRequestBodySizeFeature>(feature);
+
+        DynamicHttpEndpointRouteBuilderExtensions.EnforceRequestBodyLimit(context, 8);
+
+        Assert.Equal(4, feature.MaxRequestBodySize);
+    }
+
     private sealed class TestMaxRequestBodySizeFeature : IHttpMaxRequestBodySizeFeature
     {
         public bool IsReadOnly { get; init; }
