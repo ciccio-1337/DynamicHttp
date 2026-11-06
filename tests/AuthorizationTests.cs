@@ -153,6 +153,39 @@ public sealed class AuthorizationTests
     }
 
     [Fact]
+    public async Task Multiple_authorize_attributes_are_all_enforced()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await client.SendAsync(Request("/api/auth/multiple"))).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await client.SendAsync(Request("/api/auth/multiple",
+                User("mario"),
+                Permission("read")))).StatusCode);
+
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.SendAsync(Request("/api/auth/multiple",
+                User("mario"),
+                Permission("read"),
+                Role("Admin")))).StatusCode);
+    }
+
+    [Fact]
+    public async Task Framework_allow_anonymous_on_class_allows_anonymous_access()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/framework-anon-class");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("\"anon-class\"", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Require_authorization_by_default_requires_authorization_services()
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
@@ -246,6 +279,11 @@ public sealed class AuthorizationRulesService
     [HttpGet("/scheme")]
     [DynamicAuthorize(AuthenticationSchemes = TestAuthHandler.SchemeName)]
     public string Scheme() => "scheme";
+
+    [HttpGet("/multiple")]
+    [DynamicAuthorize(Policy = "read")]
+    [DynamicAuthorize(Roles = "Admin")]
+    public string Multiple() => "multiple";
 }
 
 public sealed class TestAuthHandler(
@@ -308,4 +346,12 @@ public sealed class FrameworkAuthorizationService
     [HttpGet("/public")]
     [AllowAnonymous]
     public string Public() => "public";
+}
+
+[HttpService("/api/framework-anon-class")]
+[AllowAnonymous]
+public sealed class FrameworkAnonymousClassService
+{
+    [HttpGet]
+    public string Get() => "anon-class";
 }

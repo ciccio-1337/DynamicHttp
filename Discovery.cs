@@ -1,11 +1,13 @@
 using System.Collections.Concurrent;
 using System.ComponentModel.DataAnnotations;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing.Patterns;
+using Microsoft.Extensions.Logging;
 
 namespace DynamicHttp;
 
@@ -13,20 +15,23 @@ internal static class DynamicHttpDiscovery
 {
     private static readonly ConcurrentDictionary<Type, bool> ObjectValidationCache = new();
 
-    private static readonly Type[] MvcBindingAttributeTypes =
+    private static readonly Type[] UnsupportedBindingAttributeTypes =
     [
         typeof(Microsoft.AspNetCore.Mvc.FromRouteAttribute),
         typeof(Microsoft.AspNetCore.Mvc.FromQueryAttribute),
         typeof(Microsoft.AspNetCore.Mvc.FromHeaderAttribute),
         typeof(Microsoft.AspNetCore.Mvc.FromBodyAttribute),
         typeof(Microsoft.AspNetCore.Mvc.FromFormAttribute),
-        typeof(Microsoft.AspNetCore.Mvc.FromServicesAttribute)
+        typeof(Microsoft.AspNetCore.Mvc.FromServicesAttribute),
+        typeof(Microsoft.AspNetCore.Http.AsParametersAttribute),
+        typeof(Microsoft.Extensions.DependencyInjection.FromKeyedServicesAttribute)
     ];
 
-    public static IReadOnlyList<Type> FindServices(Assembly assembly)
+    public static IReadOnlyList<Type> FindServices(Assembly assembly, ILogger? logger = null)
     {
         // GetTypes() throws ReflectionTypeLoadException when some types can't be loaded (e.g.
-        // missing dependencies). Load whatever is loadable instead of failing the whole scan.
+        // missing dependencies). Load whatever is loadable instead of failing the whole scan,
+        // but keep the load failures visible in the logs.
         Type[] types;
 
         try
@@ -35,6 +40,16 @@ internal static class DynamicHttpDiscovery
         }
         catch (ReflectionTypeLoadException exception)
         {
+            if (logger is not null)
+            {
+                logger.LogWarning(
+                    "DynamicHttp could not load {FailedTypeCount} type(s) from assembly '{Assembly}'. " +
+                    "Loadable types will still be scanned. First failure: {Failure}",
+                    exception.LoaderExceptions.Length,
+                    assembly.GetName().Name,
+                    exception.LoaderExceptions.FirstOrDefault()?.Message);
+            }
+
             types = exception.Types.OfType<Type>().ToArray();
         }
 
@@ -58,13 +73,14 @@ internal static class DynamicHttpDiscovery
         }
     }
 
-    public static IReadOnlyList<EndpointDefinition> Build(IEnumerable<Assembly> assemblies)
+    public static IReadOnlyList<EndpointDefinition> Build(IEnumerable<Assembly> assemblies,
+        ILogger? logger = null)
     {
         List<EndpointDefinition> result = [];
 
         foreach (var assembly in assemblies.Distinct())
         {
-            foreach (var serviceType in FindServices(assembly))
+            foreach (var serviceType in FindServices(assembly, logger))
             {
                 var service = serviceType.GetCustomAttribute<HttpServiceAttribute>()!;
 
@@ -80,6 +96,12 @@ internal static class DynamicHttpDiscovery
 
                     ValidateEndpointMethod(serviceType, method);
 
+                    if (service.RoutePrefix is null || http.Template is null)
+                    {
+                        throw Configuration(serviceType, method,
+                            "The service route prefix and the HTTP method template must not be null.");
+                    }
+
                     string route = CombineRoutes(service.RoutePrefix, http.Template);
 
                     var parameters = BuildParameters(serviceType, method);
@@ -89,6 +111,8 @@ internal static class DynamicHttpDiscovery
                     var authorization = GetAuthorization(serviceType, method);
                     var responses = serviceType.GetCustomAttributes<ProducesResponseTypeAttribute>(true)
                         .Concat(method.GetCustomAttributes<ProducesResponseTypeAttribute>(true))
+                        .GroupBy(response => (response.StatusCode, response.ResponseType))
+                        .Select(group => group.First())
                         .ToArray();
                     bool allowAnonymous = IsAllowAnonymous(serviceType) || IsAllowAnonymous(method);
 
@@ -144,6 +168,13 @@ internal static class DynamicHttpDiscovery
         {
             throw Configuration(serviceType, method, "Generic endpoint methods are not supported.");
         }
+
+        if (method.ReturnType == typeof(void) &&
+            method.IsDefined(typeof(AsyncStateMachineAttribute), inherit: false))
+        {
+            throw Configuration(serviceType, method,
+                "Async void endpoint methods are not supported; return Task or ValueTask instead.");
+        }
     }
 
     internal static ParameterDefinition[] BuildParameters(Type serviceType, MethodInfo method)
@@ -159,18 +190,19 @@ internal static class DynamicHttpDiscovery
         ParameterInfo p,
         NullabilityInfoContext nullability)
     {
-        // The library defines its own binding attributes. An MVC/ASP.NET attribute with the same
-        // name would be silently ignored and the parameter would bind from the default source
-        // (possibly a querystring instead of a header), so reject the ambiguity at startup.
-        var mvcBindingAttributes = p.GetCustomAttributes()
-            .Where(a => MvcBindingAttributeTypes.Any(t => t.IsInstanceOfType(a)))
+        // The library defines its own binding attributes. A framework binding attribute would be
+        // silently ignored and the parameter could bind from the wrong source (for example a
+        // querystring instead of a header), so reject the ambiguity at startup.
+        var unsupportedBindingAttributes = p.GetCustomAttributes()
+            .Where(a => UnsupportedBindingAttributeTypes.Any(t => t.IsInstanceOfType(a)))
             .ToArray();
 
-        if (mvcBindingAttributes.Length > 0)
+        if (unsupportedBindingAttributes.Length > 0)
         {
             throw Configuration(serviceType, method,
-                $"Parameter '{p.Name}' uses the MVC binding attribute " +
-                $"'{mvcBindingAttributes[0].GetType().Name}'; use the DynamicHttp attribute instead.");
+                $"Parameter '{p.Name}' uses the framework binding attribute " +
+                $"'{unsupportedBindingAttributes[0].GetType().Name}' which DynamicHttp does not support; " +
+                "use the DynamicHttp attribute instead.");
         }
 
         var bindingAttributes = p.GetCustomAttributes()
@@ -367,8 +399,14 @@ internal static class DynamicHttpDiscovery
         serviceType.IsDefined(typeof(DynamicAntiforgeryAttribute), true) ||
         method.IsDefined(typeof(DynamicAntiforgeryAttribute), true);
 
-    private static string CombineRoutes(string prefix, string template)
+    internal static string CombineRoutes(string? prefix, string? template)
     {
+        if (prefix is null || template is null)
+        {
+            throw new DynamicHttpConfigurationException(
+                "DynamicHttp configuration error: the route prefix and HTTP method template must not be null.");
+        }
+
         string a = prefix.Trim('/');
         string b = template.Trim('/');
         string route = string.Join("/", new[] { a, b }.Where(x => x.Length > 0));
@@ -376,24 +414,26 @@ internal static class DynamicHttpDiscovery
         return "/" + route;
     }
 
-    private static string GetVerb(HttpMethodAttribute attribute) => attribute switch
+    internal static string GetVerb(HttpMethodAttribute attribute)
     {
-        HttpGetAttribute => "GET",
-        HttpPostAttribute => "POST",
-        HttpPutAttribute => "PUT",
-        HttpPatchAttribute => "PATCH",
-        HttpDeleteAttribute => "DELETE",
-        HttpHeadAttribute => "HEAD",
-        HttpOptionsAttribute => "OPTIONS",
-        _ => throw new DynamicHttpConfigurationException($"Unsupported HTTP attribute '{attribute.GetType().Name}'.")
-    };
+        string? method = attribute.Method;
+
+        if (string.IsNullOrWhiteSpace(method))
+        {
+            throw new DynamicHttpConfigurationException(
+                $"DynamicHttp configuration error: HTTP attribute '{attribute.GetType().Name}' " +
+                "specified an empty HTTP method.");
+        }
+
+        return method.Trim().ToUpperInvariant();
+    }
 
     internal static void ValidateParameters(string route,
         IReadOnlyList<ParameterDefinition> parameters,
         Type service,
         MethodInfo method)
     {
-        HashSet<string> routeNames = RoutePatternFactory.Parse(route).Parameters
+        HashSet<string> routeNames = ParseRoutePattern(route, service, method).Parameters
             .Select(x => x.Name)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
@@ -420,25 +460,40 @@ internal static class DynamicHttpDiscovery
 
     internal static void ValidateConflicts(IEnumerable<EndpointDefinition> endpoints)
     {
-        var duplicate = endpoints
+        var candidates = endpoints
             .GroupBy(x => $"{x.HttpMethod} {NormalizeRoute(x.Route)}", StringComparer.Ordinal)
-            .FirstOrDefault(x => x.Count() > 1);
+            .Where(group => group.Count() > 1);
 
-        if (duplicate is not null)
+        foreach (var group in candidates)
         {
-            string routes = string.Join(", ", duplicate.Select(x => $"{x.HttpMethod} {x.Route}"));
-            throw new DynamicHttpConfigurationException($"Conflicting dynamic endpoints: {routes}");
+            EndpointDefinition[] items = [.. group];
+
+            for (int i = 0; i < items.Length; i++)
+            {
+                for (int j = i + 1; j < items.Length; j++)
+                {
+                    if (!ConstraintsMayOverlap(items[i].Route, items[j].Route))
+                    {
+                        continue;
+                    }
+
+                    string routes = string.Join(", ", items.Select(x => $"{x.HttpMethod} {x.Route}"));
+                    throw new DynamicHttpConfigurationException($"Conflicting dynamic endpoints: {routes}");
+                }
+            }
         }
     }
 
     /// <summary>
-    /// Builds a canonical representation of a route template with parameter names removed.
-    /// Two templates that normalize to the same value have the same precedence and can both
-    /// match the same request, which makes ASP.NET Core throw at request time.
+    /// Builds a canonical representation of a route template that ignores parameter names,
+    /// optional/default markers and constraint content, while preserving route precedence:
+    /// simple parameters, constrained parameters and catch-all parameters produce different keys.
+    /// Templates with the same key can match the same request and are checked for overlapping
+    /// constraints by <see cref="ValidateConflicts"/>.
     /// </summary>
     internal static string NormalizeRoute(string route)
     {
-        RoutePattern pattern = RoutePatternFactory.Parse(route);
+        RoutePattern pattern = ParseRoutePattern(route);
         StringBuilder builder = new();
 
         foreach (RoutePatternPathSegment segment in pattern.PathSegments)
@@ -464,18 +519,11 @@ internal static class DynamicHttpDiscovery
                             builder.Append('*');
                         }
                         builder.Append('_');
-                        if (parameter.IsOptional)
+                        if (parameter.ParameterPolicies.Count > 0)
                         {
-                            builder.Append('?');
-                        }
-                        if (parameter.Default is not null)
-                        {
-                            builder.Append('=').Append(parameter.Default);
-                        }
-                        foreach (var policy in parameter.ParameterPolicies
-                            .OrderBy(p => p.Content, StringComparer.Ordinal))
-                        {
-                            builder.Append(':').Append(policy.Content);
+                            // Any constraint makes the parameter more specific than an
+                            // unconstrained one, regardless of the constraint content.
+                            builder.Append(":C");
                         }
                         builder.Append('}');
                         break;
@@ -484,6 +532,129 @@ internal static class DynamicHttpDiscovery
         }
 
         return builder.ToString();
+    }
+
+    private static bool ConstraintsMayOverlap(string leftRoute, string rightRoute)
+    {
+        RoutePattern left = ParseRoutePattern(leftRoute);
+        RoutePattern right = ParseRoutePattern(rightRoute);
+
+        RoutePatternParameterPart[] leftParameters = [.. left.Parameters];
+        RoutePatternParameterPart[] rightParameters = [.. right.Parameters];
+
+        if (leftParameters.Length != rightParameters.Length)
+        {
+            return true;
+        }
+
+        for (int i = 0; i < leftParameters.Length; i++)
+        {
+            if (!PoliciesMayOverlap(leftParameters[i].ParameterPolicies,
+                rightParameters[i].ParameterPolicies))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool PoliciesMayOverlap(
+        IReadOnlyList<RoutePatternParameterPolicyReference> left,
+        IReadOnlyList<RoutePatternParameterPolicyReference> right)
+    {
+        ConstraintKind leftKind = ClassifyConstraints(left);
+        ConstraintKind rightKind = ClassifyConstraints(right);
+
+        // Unknown or purely neutral constraints cannot be proven disjoint.
+        if (leftKind is ConstraintKind.None or ConstraintKind.Unknown ||
+            rightKind is ConstraintKind.None or ConstraintKind.Unknown)
+        {
+            return true;
+        }
+
+        return leftKind == rightKind ||
+            (leftKind == ConstraintKind.Boolean && rightKind == ConstraintKind.Alpha) ||
+            (leftKind == ConstraintKind.Alpha && rightKind == ConstraintKind.Boolean);
+    }
+
+    private static ConstraintKind ClassifyConstraints(
+        IReadOnlyList<RoutePatternParameterPolicyReference> policies)
+    {
+        ConstraintKind kind = ConstraintKind.None;
+
+        foreach (var policy in policies)
+        {
+            string content = policy.Content ?? string.Empty;
+            int parenthesis = content.IndexOf('(');
+            string name = (parenthesis >= 0 ? content[..parenthesis] : content)
+                .Trim()
+                .ToLowerInvariant();
+
+            ConstraintKind candidate = name switch
+            {
+                "int" or "long" or "short" or "byte" or "decimal" or "double" or "float" or
+                    "min" or "max" or "range" => ConstraintKind.Numeric,
+                "guid" => ConstraintKind.Guid,
+                "bool" => ConstraintKind.Boolean,
+                "datetime" => ConstraintKind.DateTime,
+                "alpha" => ConstraintKind.Alpha,
+                "required" or "length" or "minlength" or "maxlength" => ConstraintKind.Neutral,
+                _ => ConstraintKind.Unknown
+            };
+
+            if (candidate == ConstraintKind.Unknown)
+            {
+                return ConstraintKind.Unknown;
+            }
+
+            if (candidate == ConstraintKind.Neutral)
+            {
+                continue;
+            }
+
+            if (kind == ConstraintKind.None)
+            {
+                kind = candidate;
+            }
+            else if (kind != candidate)
+            {
+                // Combined constraints from different families cannot be compared safely.
+                return ConstraintKind.Unknown;
+            }
+        }
+
+        return kind;
+    }
+
+    private static RoutePattern ParseRoutePattern(string route, Type? service = null,
+        MethodInfo? method = null)
+    {
+        try
+        {
+            return RoutePatternFactory.Parse(route);
+        }
+        catch (RoutePatternException exception)
+        {
+            string context = service is not null && method is not null
+                ? $"DynamicHttp configuration error for '{service.FullName}.{method.Name}': "
+                : "DynamicHttp configuration error: ";
+
+            throw new DynamicHttpConfigurationException(
+                $"{context}route template '{route}' is not valid: {exception.Message}", exception);
+        }
+    }
+
+    private enum ConstraintKind
+    {
+        None,
+        Unknown,
+        Neutral,
+        Numeric,
+        Guid,
+        Boolean,
+        DateTime,
+        Alpha
     }
 
     private static DynamicHttpConfigurationException Configuration(Type service, MethodInfo method, string message) =>

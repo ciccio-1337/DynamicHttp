@@ -26,8 +26,10 @@ builder.Services.AddDynamicHttp(options =>
     // Optional; when true, endpoints without authorization metadata require an authenticated user.
     options.RequireAuthorizationByDefault = false;
 });
-// Configure at least one authentication scheme (for example JwtBearer) in a real app.
-builder.Services.AddAuthentication();
+// Configure a default authentication scheme (for example JwtBearer) in a real app.
+// AddAuthentication() without a scheme is not enough: authorized endpoints need a default.
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie();
 builder.Services.AddAuthorization();
 // Only needed when an endpoint uses [DynamicAntiforgery].
 builder.Services.AddAntiforgery();
@@ -38,8 +40,6 @@ var app = builder.Build();
 app.UseDynamicHttpExceptionHandling();
 app.UseAuthentication();
 app.UseAuthorization();
-// Must precede the endpoint mapping; only needed for [DynamicAntiforgery].
-app.UseAntiforgery();
 app.MapDynamicHttp();
 app.Run();
 ```
@@ -92,11 +92,11 @@ DynamicHttp uses the ASP.NET Core source attributes:
 Rules enforced at startup:
 
 - Only one binding attribute is allowed per parameter.
-- MVC binding attributes (`Microsoft.AspNetCore.Mvc.From*`) are rejected: use the DynamicHttp attributes instead, so a parameter cannot silently bind from the wrong source.
+- Framework binding attributes that DynamicHttp does not support (`Microsoft.AspNetCore.Mvc.From*`, `AsParameters`, `FromKeyedServices`) are rejected: use the DynamicHttp attributes instead, so a parameter cannot silently bind from the wrong source.
 - An endpoint can have at most one body parameter.
 - A `[FromRoute]` parameter must exist in the route template.
 - Endpoint methods must be instance methods and cannot be generic; services cannot be open generic types.
-- Two endpoints that normalize to the same route template (for example `/x/{id}` and `/x/{name}`) are rejected.
+- Two endpoints that normalize to the same route template and can overlap (for example `/x/{id}` and `/x/{name}`, optional/default variants, or overlapping constraints) are rejected. Disjoint constraints such as `{id:int}` and `{id:guid}` remain allowed.
 
 Parameters are required unless they are nullable (`string?`, `int?`, `Dto?`) or have a C# default value. When nullable annotations are unavailable (`#nullable disable`), the parameter is treated as required. A missing required route, query or header value returns 400. `[FromBody]` requires `application/json`: an empty body returns 400, and a JSON `null` is accepted only for nullable parameters.
 
@@ -109,7 +109,8 @@ DataAnnotations validation is applied after binding:
 - Attributes on a parameter, such as `[FromQuery, Range(1, 10)] int page`, are validated for every binding source.
 - Body models are validated when the type declares validation attributes on its properties or implements `IValidatableObject`. Validation metadata is discovered once at startup; types without validation metadata are not reflected over per request.
 - Invalid input returns 400 ProblemDetails. Error messages never include the raw request value.
-- Set `options.ValidateModels = false` to disable validation (it defaults to `true`).
+- Set `options.ValidateModels = false` to disable DataAnnotations validation for both parameters
+  and body models (it defaults to `true`). Binding and type conversion still run.
 
 ## Request body limit
 
@@ -131,7 +132,7 @@ Set `options.RequireAuthorizationByDefault = true` to make authentication the de
 
 ### Antiforgery (CSRF)
 
-Mark cookie-authenticated state-changing endpoints with `[DynamicAntiforgery]` (method or class). The library adds standard antiforgery endpoint metadata; register `AddAntiforgery()` and call `app.UseAntiforgery()` before mapping. The token is validated for `POST`/`PUT`/`PATCH`/`DELETE`; missing or invalid tokens return 400, and the check fails closed if the middleware is not in the pipeline.
+Mark cookie-authenticated state-changing endpoints with `[DynamicAntiforgery]` (method or class). Register `AddAntiforgery()`; the library validates the token directly for `POST`/`PUT`/`PATCH`/`DELETE`, so `app.UseAntiforgery()` is not required for these endpoints. Missing or invalid tokens return 400, and the check fails closed even when antiforgery services or middleware are absent.
 
 ## Exceptions
 
@@ -148,7 +149,10 @@ Register `UseDynamicHttpExceptionHandling()` in the pipeline; it converts except
 
 ## Sample
 
-The `Sample/` app is a demo and is never packed or published. Its development authentication handler is disabled by default; it is registered only when `ASPNETCORE_ENVIRONMENT=Development` **and** `DevAuth:Enabled=true`, and it only authenticates loopback requests:
+The `Sample/` app is a demo and is never packed or published. Its launch profile sets
+`ASPNETCORE_ENVIRONMENT=Development`; the development authentication handler is still disabled
+unless `DevAuth:Enabled=true` is passed. It only authenticates loopback requests. When disabled,
+the scheme is still the default one and challenges protected endpoints with 401:
 
 ```bash
 dotnet run --project Sample -- --DevAuth:Enabled=true
@@ -163,3 +167,8 @@ dotnet run --project Sample -- --DevAuth:Enabled=true --DevAuth:GrantAdmin=true
 ## Notes
 
 This package intentionally uses native ASP.NET Core endpoint metadata so authorization, rate limiting, tags, response metadata and other framework features can compose with the generated endpoints.
+
+Custom HTTP verbs can be added by deriving from `HttpMethodAttribute` and overriding `Method`.
+Route conflicts are detected at startup, including optional/default parameters and overlapping
+constraints (for example `{id:int}` vs `{id:min(1)}`), while clearly disjoint constraints such as
+`{id:int}` and `{id:guid}` remain allowed.

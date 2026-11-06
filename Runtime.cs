@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
@@ -13,12 +14,14 @@ namespace DynamicHttp;
 public sealed class DynamicHttpRegistry
 {
     private readonly DynamicHttpOptions _options;
+    private readonly ILogger? _logger;
     private readonly Lazy<IReadOnlyList<EndpointDefinition>> _definitions;
 
-    public DynamicHttpRegistry(DynamicHttpOptions options)
+    public DynamicHttpRegistry(DynamicHttpOptions options, ILoggerFactory? loggerFactory = null)
     {
         _options = options;
-        _definitions = new(() => DynamicHttpDiscovery.Build(_options.Assemblies),
+        _logger = loggerFactory?.CreateLogger("DynamicHttp");
+        _definitions = new(() => DynamicHttpDiscovery.Build(_options.Assemblies, _logger),
             LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
@@ -33,9 +36,26 @@ public sealed class DynamicHttpRegistry
 
 public static class DynamicHttpEndpointRouteBuilderExtensions
 {
+    private static readonly ConditionalWeakTable<IEndpointRouteBuilder, object> MappedBuilders = new();
+
     public static IEndpointRouteBuilder MapDynamicHttp(this IEndpointRouteBuilder endpoints)
     {
-        var registry = endpoints.ServiceProvider.GetRequiredService<DynamicHttpRegistry>();
+        ArgumentNullException.ThrowIfNull(endpoints);
+
+        if (MappedBuilders.TryGetValue(endpoints, out _))
+        {
+            // Mapping is idempotent: calling it again must not register duplicate endpoints,
+            // which would make routing ambiguous at request time.
+            return endpoints;
+        }
+
+        var registry = endpoints.ServiceProvider.GetService<DynamicHttpRegistry>();
+
+        if (registry is null)
+        {
+            throw new DynamicHttpConfigurationException(
+                "DynamicHttp configuration error: AddDynamicHttp() must be called before MapDynamicHttp().");
+        }
 
         if (registry.RequireAuthorizationByDefault &&
             endpoints.ServiceProvider.GetService<IAuthorizationPolicyProvider>() is null)
@@ -61,29 +81,12 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
                     try
                     {
                         if (definition.RequireAntiforgery &&
-                            IsStateChangingMethod(definition.HttpMethod) &&
-                            context.Features.Get<IAntiforgeryValidationFeature>() is not { IsValid: true })
+                            IsStateChangingMethod(definition.HttpMethod))
                         {
-                            // AntiforgeryMiddleware validates the token and records the result in
-                            // this feature. Fail closed: a missing middleware (null feature) must
-                            // reject too, otherwise [DynamicAntiforgery] would silently do nothing.
-                            throw new BadRequestHttpException("The antiforgery token is missing or invalid.");
+                            await ValidateAntiforgeryAsync(context);
                         }
 
-                        if (registry.MaxRequestBodyBytes is long maxRequestBodyBytes)
-                        {
-                            if (context.Request.ContentLength > maxRequestBodyBytes)
-                            {
-                                throw new PayloadTooLargeHttpException(
-                                    $"The request body exceeds the configured limit of {maxRequestBodyBytes} bytes.");
-                            }
-
-                            // Enforce the same limit for chunked bodies, where Content-Length is absent.
-                            if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } feature)
-                            {
-                                feature.MaxRequestBodySize = maxRequestBodyBytes;
-                            }
-                        }
+                        EnforceRequestBodyLimit(context, registry.MaxRequestBodyBytes);
 
                         object?[] arguments = new object?[definition.Parameters.Count];
 
@@ -152,13 +155,6 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
                 route.RequireAuthorization();
             }
 
-            if (definition.RequireAntiforgery)
-            {
-                // The endpoint metadata consumed by AntiforgeryMiddleware. Requires
-                // app.UseAntiforgery() in the pipeline.
-                route.WithMetadata(new RequireAntiforgeryTokenAttribute(required: true));
-            }
-
             foreach (string tag in definition.Tags)
             {
                 route.WithTags(tag);
@@ -182,7 +178,52 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
             }
         }
 
+        MappedBuilders.Add(endpoints, new object());
+
         return endpoints;
+    }
+
+    internal static async Task ValidateAntiforgeryAsync(HttpContext context)
+    {
+        // Validate directly instead of relying on AntiforgeryMiddleware. The framework rejects
+        // endpoints carrying antiforgery metadata when app.UseAntiforgery() is missing, turning a
+        // missing middleware into a 500. Validating here keeps the check fail-closed with a 400
+        // whether or not the middleware is in the pipeline.
+        IAntiforgery? antiforgery = context.RequestServices.GetService<IAntiforgery>();
+
+        if (antiforgery is null)
+        {
+            throw new BadRequestHttpException("The antiforgery token is missing or invalid.");
+        }
+
+        try
+        {
+            await antiforgery.ValidateRequestAsync(context);
+        }
+        catch (AntiforgeryValidationException)
+        {
+            throw new BadRequestHttpException("The antiforgery token is missing or invalid.");
+        }
+    }
+
+    internal static void EnforceRequestBodyLimit(HttpContext context, long? limit)
+    {
+        if (limit is not long maxRequestBodyBytes)
+        {
+            return;
+        }
+
+        if (context.Request.ContentLength > maxRequestBodyBytes)
+        {
+            throw new PayloadTooLargeHttpException(
+                $"The request body exceeds the configured limit of {maxRequestBodyBytes} bytes.");
+        }
+
+        // Enforce the same limit for chunked bodies, where Content-Length is absent.
+        if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } feature)
+        {
+            feature.MaxRequestBodySize = maxRequestBodyBytes;
+        }
     }
 
     private static bool IsStateChangingMethod(string httpMethod) =>

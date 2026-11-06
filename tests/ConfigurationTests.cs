@@ -82,6 +82,94 @@ public sealed class ConfigurationTests
                 options.MaxRequestBodyBytes = 0;
             }));
     }
+
+    [Fact]
+    public void AddDynamicHttp_rejects_factory_registered_options()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<DynamicHttpOptions>(_ => new DynamicHttpOptions());
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            services.AddDynamicHttp(options =>
+                options.ScanAssemblies(typeof(ValuesService).Assembly)));
+
+        Assert.Contains("without an instance", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddDynamicHttp_rejects_conflicting_options_on_repeated_calls()
+    {
+        var services = new ServiceCollection();
+
+        services.AddDynamicHttp(options =>
+        {
+            options.ScanAssemblies(typeof(ValuesService).Assembly);
+            options.MaxRequestBodyBytes = 8;
+        });
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            services.AddDynamicHttp(options =>
+            {
+                options.ScanAssemblies(typeof(ValuesService).Assembly);
+                options.MaxRequestBodyBytes = 9;
+            }));
+
+        Assert.Contains(nameof(DynamicHttpOptions.MaxRequestBodyBytes), exception.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AddDynamicHttp_rejects_changing_default_service_lifetime_after_registration()
+    {
+        var services = new ServiceCollection();
+
+        services.AddDynamicHttp(options =>
+        {
+            options.ScanAssemblies(typeof(ValuesService).Assembly);
+            options.DefaultServiceLifetime = ServiceLifetime.Transient;
+        });
+
+        Assert.Throws<DynamicHttpConfigurationException>(() =>
+            services.AddDynamicHttp(options =>
+            {
+                options.ScanAssemblies(typeof(ValuesService).Assembly);
+                options.DefaultServiceLifetime = ServiceLifetime.Scoped;
+            }));
+    }
+
+    [Fact]
+    public void AddDynamicHttp_allows_repeating_the_same_option_value()
+    {
+        var services = new ServiceCollection();
+
+        services.AddDynamicHttp(options =>
+        {
+            options.ScanAssemblies(typeof(ValuesService).Assembly);
+            options.MaxRequestBodyBytes = 8;
+        });
+        services.AddDynamicHttp(options =>
+        {
+            options.ScanAssemblies(typeof(ValuesService).Assembly);
+            options.MaxRequestBodyBytes = 8;
+        });
+
+        Assert.Single(services, x => x.ServiceType == typeof(DynamicHttpOptions));
+    }
+
+    [Fact]
+    public void AddDynamicHttp_merges_an_option_set_only_by_a_later_call()
+    {
+        var services = new ServiceCollection();
+
+        services.AddDynamicHttp(options =>
+            options.ScanAssemblies(typeof(ValuesService).Assembly));
+        services.AddDynamicHttp(options => options.MaxRequestBodyBytes = 12);
+
+        using var provider = services.BuildServiceProvider();
+        var options = provider.GetRequiredService<DynamicHttpOptions>();
+
+        Assert.Equal(12, options.MaxRequestBodyBytes);
+    }
 }
 
 public sealed class AwaitingTests

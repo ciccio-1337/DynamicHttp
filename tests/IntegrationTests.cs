@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Net;
 using System.Security.Claims;
 using System.Text;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
@@ -629,6 +630,213 @@ public sealed class IntegrationTests
         Assert.DoesNotContain(nameof(InvalidOperationException), body, StringComparison.Ordinal);
         Assert.Contains("traceId", body, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Validation_can_be_disabled_for_parameters_and_models()
+    {
+        await using WebApplication app = await StartAppAsync(
+            configureOptions: options => options.ValidateModels = false);
+        var client = app.GetTestClient();
+
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.GetAsync("/api/values/validated?page=0")).StatusCode);
+
+        var response = await client.PostAsync("/api/values/validatedbody",
+            new StringContent("""{"name":""}""", Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Empty_nullable_query_value_binds_null()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        Assert.Equal("\"<null>\"",
+            await client.GetStringAsync("/api/values/emptynullable?page="));
+        Assert.Equal("\"5\"",
+            await client.GetStringAsync("/api/values/emptynullable?page=5"));
+        Assert.Equal("\"<null>\"",
+            await client.GetStringAsync("/api/values/emptynullable"));
+    }
+
+    [Fact]
+    public async Task Empty_nullable_header_value_binds_null()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var request = new HttpRequestMessage(System.Net.Http.HttpMethod.Get,
+            "/api/values/emptyheader");
+        request.Headers.TryAddWithoutValidation("X-Page", "");
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("\"<null>\"", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Head_and_options_endpoints_are_mapped()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var head = await client.SendAsync(
+            new HttpRequestMessage(System.Net.Http.HttpMethod.Head, "/api/values/head"));
+        Assert.Equal(HttpStatusCode.OK, head.StatusCode);
+
+        var options = await client.SendAsync(
+            new HttpRequestMessage(System.Net.Http.HttpMethod.Options, "/api/values/options"));
+        Assert.Equal(HttpStatusCode.OK, options.StatusCode);
+    }
+
+    [Fact]
+    public async Task NotFoundHttpException_maps_to_404_problem_details()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/notfound");
+        string body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Contains("Resource not found", body, StringComparison.Ordinal);
+        Assert.Contains("traceId", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Missing_from_services_registration_returns_internal_server_error()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/missingservice");
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Null_result_returns_empty_200()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        foreach (string path in new[] { "/api/values/nullresult", "/api/values/nullvalueresult" })
+        {
+            var response = await client.GetAsync(path);
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(string.Empty, await response.Content.ReadAsStringAsync());
+        }
+    }
+
+    [Fact]
+    public async Task Flags_enum_accepts_declared_combinations_and_rejects_undefined_bits()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var valid = await client.GetAsync("/api/values/flags/Read,Write");
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+        Assert.Equal("\"Read, Write\"", await valid.Content.ReadAsStringAsync());
+
+        var invalid = await client.GetAsync("/api/values/flags/8");
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+    }
+
+    [Fact]
+    public async Task MapDynamicHttp_is_idempotent()
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddDynamicHttp(options =>
+            options.ScanAssemblies(typeof(ValuesService).Assembly));
+
+        await using WebApplication app = builder.Build();
+        app.UseDynamicHttpExceptionHandling();
+        app.MapDynamicHttp();
+        app.MapDynamicHttp();
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.GetAsync("/api/values/plain");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public void MapDynamicHttp_without_registration_throws()
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        using WebApplication app = builder.Build();
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() => app.MapDynamicHttp());
+
+        Assert.Contains("AddDynamicHttp", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Antiforgery_fails_closed_without_middleware()
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddAntiforgery();
+        builder.Services.AddDynamicHttp(options =>
+            options.ScanAssemblies(typeof(ValuesService).Assembly));
+
+        await using WebApplication app = builder.Build();
+        app.UseRouting();
+        app.UseDynamicHttpExceptionHandling();
+        app.MapDynamicHttp();
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var response = await client.PostAsync("/api/values/antiforgery",
+            new StringContent("", Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Antiforgery_accepts_a_valid_token()
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddAntiforgery();
+        builder.Services.AddDynamicHttp(options =>
+            options.ScanAssemblies(typeof(ValuesService).Assembly));
+
+        await using WebApplication app = builder.Build();
+        app.UseRouting();
+        app.UseDynamicHttpExceptionHandling();
+        app.MapDynamicHttp();
+        app.MapGet("/antiforgery-token", (HttpContext context, IAntiforgery antiforgery) =>
+        {
+            var tokens = antiforgery.GetAndStoreTokens(context);
+            return Results.Text(tokens.RequestToken);
+        });
+        await app.StartAsync();
+
+        var client = app.GetTestClient();
+        var tokenResponse = await client.GetAsync("/antiforgery-token");
+        string requestToken = await tokenResponse.Content.ReadAsStringAsync();
+        string cookie = tokenResponse.Headers.GetValues("Set-Cookie").First().Split(';')[0];
+
+        var request = new HttpRequestMessage(System.Net.Http.HttpMethod.Post,
+            "/api/values/antiforgery")
+        {
+            Content = new StringContent("", Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("RequestVerificationToken", requestToken);
+        request.Headers.Add("Cookie", cookie);
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("\"antiforgery\"", await response.Content.ReadAsStringAsync());
+    }
 }
 
 [HttpService("/api/values")]
@@ -744,6 +952,36 @@ public sealed class ValuesService
     [DynamicAntiforgery]
     public string Antiforgery() => "antiforgery";
 
+    [HttpGet("/emptynullable")]
+    public string EmptyNullable([FromQuery] int? page) =>
+        page?.ToString(CultureInfo.InvariantCulture) ?? "<null>";
+
+    [HttpGet("/emptyheader")]
+    public string EmptyHeader([FromHeader("X-Page")] int? page) =>
+        page?.ToString(CultureInfo.InvariantCulture) ?? "<null>";
+
+    [HttpHead("/head")]
+    public string Head() => "head";
+
+    [HttpOptions("/options")]
+    public string Options() => "options";
+
+    [HttpGet("/notfound")]
+    public string NotFound() => throw new NotFoundHttpException("missing");
+
+    [HttpGet("/missingservice")]
+    public string MissingService([FromServices] MissingServiceDependency dependency) =>
+        dependency.Value;
+
+    [HttpGet("/nullresult")]
+    public string? NullResult() => null;
+
+    [HttpGet("/nullvalueresult")]
+    public ValueTask<string?> NullValueResult() => ValueTask.FromResult<string?>(null);
+
+    [HttpGet("/flags/{permissions}")]
+    public string Flags([FromRoute] Permissions permissions) => permissions.ToString();
+
     [HttpGet("/time/{t}")]
     public string TimeRoute([FromRoute] TimeSpan t) => t.ToString();
 
@@ -771,6 +1009,14 @@ public sealed class ValuesService
 }
 
 public enum Color { Red, Green, Blue }
+
+[Flags]
+public enum Permissions { None = 0, Read = 1, Write = 2, Execute = 4 }
+
+public sealed class MissingServiceDependency
+{
+    public string Value => "missing-service";
+}
 
 [HttpService("/api/scoped")]
 public sealed class ScopedProbeService

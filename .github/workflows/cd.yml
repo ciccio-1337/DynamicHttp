@@ -24,11 +24,14 @@ jobs:
           dotnet nuget push ./artifacts/*.nupkg \
             --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
             --api-key ${{ secrets.GITHUB_TOKEN }} \
+            --username ${{ github.repository_owner }} \
             --skip-duplicate
       - uses: NuGet/login@v1
         id: nuget-login
         with:
-          user: ${{ github.repository_owner }}
+          # Must be the nuget.org account name, not the GitHub owner. Store it as a repository
+          # secret named NUGET_USER.
+          user: ${{ secrets.NUGET_USER }}
       - run: |
           dotnet nuget push ./artifacts/*.nupkg \
             --source https://api.nuget.org/v3/index.json \

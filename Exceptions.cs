@@ -4,9 +4,17 @@ using Microsoft.Extensions.Logging;
 
 namespace DynamicHttp;
 
-public class DynamicHttpException(string message) : Exception(message);
+public class DynamicHttpException : Exception
+{
+    public DynamicHttpException(string message) : base(message) { }
+    public DynamicHttpException(string message, Exception innerException) : base(message, innerException) { }
+}
 
-public sealed class DynamicHttpConfigurationException(string message) : DynamicHttpException(message);
+public sealed class DynamicHttpConfigurationException : DynamicHttpException
+{
+    public DynamicHttpConfigurationException(string message) : base(message) { }
+    public DynamicHttpConfigurationException(string message, Exception innerException) : base(message, innerException) { }
+}
 
 public interface IHttpException
 {
@@ -96,7 +104,7 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
                 logger.LogInformation(
                     "DynamicHttp request failed for {Method} {Path} with status code {StatusCode}",
                     context.Request.Method,
-                    context.Request.Path,
+                    SanitizeForLog(context.Request.Path.Value),
                     statusCode);
             }
             else if (exception is BadHttpRequestException badRequest)
@@ -111,7 +119,7 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
                 logger.LogInformation(
                     "DynamicHttp request failed for {Method} {Path} with status code {StatusCode}",
                     context.Request.Method,
-                    context.Request.Path,
+                    SanitizeForLog(context.Request.Path.Value),
                     statusCode);
             }
             else
@@ -128,7 +136,7 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
                     logger.LogError(exception,
                         "Unhandled DynamicHttp exception for {Method} {Path}. TraceId: {TraceId}",
                         context.Request.Method,
-                        context.Request.Path,
+                        SanitizeForLog(context.Request.Path.Value),
                         context.TraceIdentifier);
                 }
             }
@@ -147,6 +155,22 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
                     ["traceId"] = context.TraceIdentifier
                 }).ExecuteAsync(context);
         }
+    }
+
+    internal static string SanitizeForLog(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return string.Empty;
+        }
+
+        return string.Create(value.Length, value, static (span, source) =>
+        {
+            for (int i = 0; i < source.Length; i++)
+            {
+                span[i] = char.IsControl(source[i]) ? '?' : source[i];
+            }
+        });
     }
 
     private static string TitleFor(int statusCode) => statusCode switch

@@ -7,9 +7,22 @@ namespace DynamicHttp;
 
 public sealed class DynamicHttpOptions
 {
+    private ServiceLifetime _defaultServiceLifetime = ServiceLifetime.Scoped;
+    private bool _requireAuthorizationByDefault;
+    private bool _validateModels = true;
+    private long? _maxRequestBodyBytes;
+
     internal List<Assembly> Assemblies { get; } = [];
 
-    public ServiceLifetime DefaultServiceLifetime { get; set; } = ServiceLifetime.Scoped;
+    public ServiceLifetime DefaultServiceLifetime
+    {
+        get => _defaultServiceLifetime;
+        set
+        {
+            _defaultServiceLifetime = value;
+            DefaultServiceLifetimeSet = true;
+        }
+    }
 
     /// <summary>
     /// When true, endpoints without <c>[DynamicAuthorize]</c>, a framework <c>[Authorize]</c>
@@ -17,20 +30,50 @@ public sealed class DynamicHttpOptions
     /// require an authenticated user. Defaults to false to preserve the opt-in behavior of
     /// previous versions; enable it in new services.
     /// </summary>
-    public bool RequireAuthorizationByDefault { get; set; }
+    public bool RequireAuthorizationByDefault
+    {
+        get => _requireAuthorizationByDefault;
+        set
+        {
+            _requireAuthorizationByDefault = value;
+            RequireAuthorizationByDefaultSet = true;
+        }
+    }
 
     /// <summary>
     /// When true (default), DataAnnotations validation attributes on parameters and on body
-    /// models are enforced after binding. Errors produce a 400 ProblemDetails response.
+    /// models are enforced after binding. When false, validation is skipped entirely. Errors
+    /// produce a 400 ProblemDetails response.
     /// </summary>
-    public bool ValidateModels { get; set; } = true;
+    public bool ValidateModels
+    {
+        get => _validateModels;
+        set
+        {
+            _validateModels = value;
+            ValidateModelsSet = true;
+        }
+    }
 
     /// <summary>
     /// Optional maximum request body size, in bytes, applied to every dynamic endpoint before
     /// binding. Requests that exceed the limit are rejected with 413. When null, the server's
     /// default limit applies.
     /// </summary>
-    public long? MaxRequestBodyBytes { get; set; }
+    public long? MaxRequestBodyBytes
+    {
+        get => _maxRequestBodyBytes;
+        set
+        {
+            _maxRequestBodyBytes = value;
+            MaxRequestBodyBytesSet = true;
+        }
+    }
+
+    internal bool DefaultServiceLifetimeSet { get; private set; }
+    internal bool RequireAuthorizationByDefaultSet { get; private set; }
+    internal bool ValidateModelsSet { get; private set; }
+    internal bool MaxRequestBodyBytesSet { get; private set; }
 
     public void ScanAssemblies(params Assembly[] assemblies)
     {
@@ -66,11 +109,21 @@ public static class DynamicHttpServiceCollectionExtensions
             options.ScanAssemblies(Assembly.GetCallingAssembly());
         }
 
-        DynamicHttpOptions? existing = services
-            .Where(descriptor => descriptor.ServiceType == typeof(DynamicHttpOptions))
+        ServiceDescriptor[] descriptors = [.. services
+            .Where(descriptor => descriptor.ServiceType == typeof(DynamicHttpOptions))];
+
+        DynamicHttpOptions? existing = descriptors
             .Select(descriptor => descriptor.ImplementationInstance)
             .OfType<DynamicHttpOptions>()
             .FirstOrDefault();
+
+        if (descriptors.Any(descriptor => descriptor.ImplementationInstance is not DynamicHttpOptions))
+        {
+            throw new DynamicHttpConfigurationException(
+                "DynamicHttp configuration error: DynamicHttpOptions is already registered without an " +
+                "instance. Configure options through AddDynamicHttp(options => ...) instead of " +
+                "registering DynamicHttpOptions separately.");
+        }
 
         if (existing is null)
         {
@@ -79,8 +132,9 @@ public static class DynamicHttpServiceCollectionExtensions
         }
         else
         {
-            // Keep the first registration (and its already-built registry) and merge the new
-            // assemblies into it so repeated AddDynamicHttp calls are additive and idempotent.
+            // Keep the first registration and merge the new settings into it. Repeated calls are
+            // additive for assemblies, but scalar options must not silently disagree.
+            ApplyOptions(existing, options);
             existing.ScanAssemblies([.. options.Assemblies]);
         }
 
@@ -89,6 +143,58 @@ public static class DynamicHttpServiceCollectionExtensions
 
         return services;
     }
+
+    private static void ApplyOptions(DynamicHttpOptions existing, DynamicHttpOptions options)
+    {
+        if (options.DefaultServiceLifetimeSet &&
+            options.DefaultServiceLifetime != existing.DefaultServiceLifetime)
+        {
+            // Services discovered by the first call were already registered with the old lifetime,
+            // so changing it now would leave the container in an inconsistent state.
+            throw OptionConflict(nameof(DynamicHttpOptions.DefaultServiceLifetime));
+        }
+
+        if (options.DefaultServiceLifetimeSet)
+        {
+            existing.DefaultServiceLifetime = options.DefaultServiceLifetime;
+        }
+
+        if (options.RequireAuthorizationByDefaultSet)
+        {
+            if (existing.RequireAuthorizationByDefaultSet &&
+                existing.RequireAuthorizationByDefault != options.RequireAuthorizationByDefault)
+            {
+                throw OptionConflict(nameof(DynamicHttpOptions.RequireAuthorizationByDefault));
+            }
+
+            existing.RequireAuthorizationByDefault = options.RequireAuthorizationByDefault;
+        }
+
+        if (options.ValidateModelsSet)
+        {
+            if (existing.ValidateModelsSet && existing.ValidateModels != options.ValidateModels)
+            {
+                throw OptionConflict(nameof(DynamicHttpOptions.ValidateModels));
+            }
+
+            existing.ValidateModels = options.ValidateModels;
+        }
+
+        if (options.MaxRequestBodyBytesSet)
+        {
+            if (existing.MaxRequestBodyBytesSet &&
+                existing.MaxRequestBodyBytes != options.MaxRequestBodyBytes)
+            {
+                throw OptionConflict(nameof(DynamicHttpOptions.MaxRequestBodyBytes));
+            }
+
+            existing.MaxRequestBodyBytes = options.MaxRequestBodyBytes;
+        }
+    }
+
+    private static DynamicHttpConfigurationException OptionConflict(string propertyName) =>
+        new($"DynamicHttp configuration error: '{propertyName}' was configured differently by a " +
+            "later AddDynamicHttp call. Configure each option once, in the first call.");
 
     private static void RegisterDiscoveredServices(IServiceCollection services, DynamicHttpOptions options)
     {

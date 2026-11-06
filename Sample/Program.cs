@@ -13,19 +13,14 @@ builder.Services.AddDynamicHttp(options =>
 bool devAuthEnabled = builder.Environment.IsDevelopment() &&
     builder.Configuration.GetValue<bool>("DevAuth:Enabled");
 
-if (devAuthEnabled)
-{
-    builder.Services
-        .AddAuthentication(Sample.DevAuthHandler.SchemeName)
-        .AddScheme<Microsoft.AspNetCore.Authentication.AuthenticationSchemeOptions, Sample.DevAuthHandler>(
-            Sample.DevAuthHandler.SchemeName, _ => { });
-}
-else
-{
-    // Register the authentication services without the development handler. A real deployment
-    // should configure its own default scheme here.
-    builder.Services.AddAuthentication();
-}
+// Register the development scheme as the default even when disabled: it then returns NoResult,
+// so protected endpoints challenge with 401 instead of throwing because no default scheme exists.
+// A real deployment must replace it with its own authentication scheme.
+builder.Services
+    .AddAuthentication(Sample.DevAuthHandler.SchemeName)
+    .AddScheme<Sample.DevAuthOptions, Sample.DevAuthHandler>(
+        Sample.DevAuthHandler.SchemeName,
+        options => options.Enabled = devAuthEnabled);
 builder.Services.AddAuthorizationBuilder().AddPolicy("users.read", policy => policy.RequireClaim("users.read", ["true"]));
 
 var app = builder.Build();

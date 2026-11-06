@@ -3,6 +3,7 @@ obj/
 .vs/
 .idea/
 TestResults/
+artifacts/
 *.user
 *.suo
 *.nupkg

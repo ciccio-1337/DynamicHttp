@@ -241,7 +241,7 @@ public sealed class DiscoveryTests
         var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
             DynamicHttpDiscovery.BuildParameters(typeof(MvcBindingService), method));
 
-        Assert.Contains("MVC binding attribute", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("framework binding attribute", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -274,6 +274,116 @@ public sealed class DiscoveryTests
             DynamicHttpDiscovery.BuildParameters(typeof(ValidatedParameterService), method));
 
         Assert.Single(parameter.ValidationAttributes);
+    }
+
+    [Theory]
+    [InlineData("/api/{id}", "/api/{id?}")]
+    [InlineData("/api/{id}", "/api/{id=5}")]
+    [InlineData("/api/{id:int}", "/api/{id:min(1)}")]
+    public void Same_precedence_overlapping_routes_conflict(string left, string right)
+    {
+        EndpointDefinition[] endpoints =
+        [
+            CreateEndpoint(left),
+            CreateEndpoint(right)
+        ];
+
+        Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateConflicts(endpoints));
+    }
+
+    [Fact]
+    public void Disjoint_constraints_are_not_treated_as_conflicts()
+    {
+        EndpointDefinition[] endpoints =
+        [
+            CreateEndpoint("/api/{id:int}"),
+            CreateEndpoint("/api/{id:guid}")
+        ];
+
+        DynamicHttpDiscovery.ValidateConflicts(endpoints);
+    }
+
+    [Fact]
+    public void Malformed_route_throws_configuration_error()
+    {
+        var method = typeof(DiscoveryTests).GetMethod(nameof(ToString))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateParameters("/api/{id", [], typeof(DiscoveryTests), method));
+
+        Assert.Contains("not valid", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null, "/api")]
+    [InlineData("/api", null)]
+    public void Null_route_text_throws_configuration_error(string? prefix, string? template)
+    {
+        Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.CombineRoutes(prefix, template));
+    }
+
+    [Fact]
+    public void Async_void_endpoint_method_throws()
+    {
+        var method = typeof(AsyncVoidEndpoint).GetMethod(nameof(AsyncVoidEndpoint.Get))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateEndpointMethod(typeof(AsyncVoidEndpoint), method));
+
+        Assert.Contains("async void", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void As_parameters_binding_attribute_is_rejected()
+    {
+        var method = typeof(AsParametersBindingService)
+            .GetMethod(nameof(AsParametersBindingService.Get))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(AsParametersBindingService), method));
+
+        Assert.Contains("framework binding attribute", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Keyed_services_binding_attribute_is_rejected()
+    {
+        var method = typeof(KeyedServicesBindingService)
+            .GetMethod(nameof(KeyedServicesBindingService.Get))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(KeyedServicesBindingService), method));
+
+        Assert.Contains("framework binding attribute", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Custom_http_method_attribute_is_supported()
+    {
+        var endpoints = DynamicHttpDiscovery.Build([typeof(DiscoveryTests).Assembly]);
+        var endpoint = Assert.Single(endpoints, x => x.ServiceType == typeof(CustomVerbService));
+
+        Assert.Equal("PROPFIND", endpoint.HttpMethod);
+    }
+
+    [Fact]
+    public void Empty_custom_http_method_throws()
+    {
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.GetVerb(new HttpEmptyMethodAttribute()));
+
+        Assert.Contains("empty HTTP method", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Duplicate_produces_response_metadata_is_collapsed()
+    {
+        var endpoints = DynamicHttpDiscovery.Build([typeof(DiscoveryTests).Assembly]);
+        var endpoint = Assert.Single(endpoints, x => x.ServiceType == typeof(DuplicateProducesService));
+
+        Assert.Single(endpoint.Responses);
     }
 
     private const string TestScheme = "Test";
@@ -431,5 +541,51 @@ public sealed class DiscoveryTests
     private sealed class ValidatedParameterService
     {
         public string Get([FromQuery, Range(1, 10)] int page) => page.ToString();
+    }
+
+    private sealed class AsyncVoidEndpoint
+    {
+        [HttpGet]
+        public async void Get() => await Task.Yield();
+    }
+
+    private sealed class AsParametersBindingService
+    {
+        public string Get([Microsoft.AspNetCore.Http.AsParameters] int value) => value.ToString();
+    }
+
+    private sealed class KeyedServicesBindingService
+    {
+        public string Get(
+            [Microsoft.Extensions.DependencyInjection.FromKeyedServices("key")] int value) =>
+            value.ToString();
+    }
+
+    [AttributeUsage(AttributeTargets.Method)]
+    private sealed class HttpPropFindAttribute(string template = "") : HttpMethodAttribute(template)
+    {
+        public override string Method => "PROPFIND";
+    }
+
+    [AttributeUsage(AttributeTargets.Method)]
+    private sealed class HttpEmptyMethodAttribute : HttpMethodAttribute
+    {
+        public override string Method => string.Empty;
+    }
+
+    [HttpService("/api/custom-verb")]
+    private sealed class CustomVerbService
+    {
+        [HttpPropFind]
+        public string Get() => "custom";
+    }
+
+    [HttpService("/api/produces")]
+    [ProducesResponseType(200)]
+    private sealed class DuplicateProducesService
+    {
+        [HttpGet]
+        [ProducesResponseType(200)]
+        public string Get() => "x";
     }
 }

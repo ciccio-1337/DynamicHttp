@@ -28,14 +28,18 @@ internal static class DynamicHttpBinding
     }
 
     /// <summary>
-    /// Applies DataAnnotations validation to a bound argument. Parameter attributes are always
-    /// validated; object validation runs when the model declares validation metadata and the
-    /// application has not disabled it through <see cref="DynamicHttpOptions.ValidateModels"/>.
-    /// Error messages never include the raw request value.
+    /// Applies DataAnnotations validation to a bound argument when
+    /// <see cref="DynamicHttpOptions.ValidateModels"/> is enabled. Parameter attributes and object
+    /// validation share the same switch. Error messages never include the raw request value.
     /// </summary>
     public static void Validate(object? value, ParameterDefinition definition,
         IServiceProvider services, bool validateModels)
     {
+        if (!validateModels)
+        {
+            return;
+        }
+
         if (definition.ValidationAttributes.Count > 0)
         {
             // ValidationContext requires a non-null instance even when validating a null value.
@@ -51,7 +55,7 @@ internal static class DynamicHttpBinding
             }
         }
 
-        if (!validateModels || !definition.RequiresObjectValidation || value is null)
+        if (!definition.RequiresObjectValidation || value is null)
         {
             return;
         }
@@ -119,6 +123,13 @@ internal static class DynamicHttpBinding
     private static object? ConvertValue(object? value, ParameterDefinition definition)
     {
         Type type = definition.ParameterType;
+
+        // An explicitly empty query/header value (for example "?page=") is treated as absent for
+        // nullable value types, matching the usual minimal-API behavior.
+        if (value is string { Length: 0 } && Nullable.GetUnderlyingType(type) is not null)
+        {
+            value = null;
+        }
 
         if (value is null)
         {
@@ -213,18 +224,18 @@ internal static class DynamicHttpBinding
         return (EnumBits(value) & ~allowed) == 0;
     }
 
-    private static ulong EnumBits(object value) => value switch
+    private static ulong EnumBits(object value)
     {
-        sbyte number => unchecked((ulong)number),
-        byte number => number,
-        short number => unchecked((ulong)number),
-        ushort number => number,
-        int number => unchecked((ulong)number),
-        uint number => number,
-        long number => unchecked((ulong)number),
-        ulong number => number,
-        _ => throw new ArgumentException("Unsupported enum underlying type.", nameof(value))
-    };
+        // Enum values are boxed as their declared enum type, not as the underlying integer type.
+        Type underlying = Enum.GetUnderlyingType(value.GetType());
+
+        return Type.GetTypeCode(underlying) switch
+        {
+            TypeCode.SByte or TypeCode.Int16 or TypeCode.Int32 or TypeCode.Int64 =>
+                unchecked((ulong)Convert.ToInt64(value, CultureInfo.InvariantCulture)),
+            _ => Convert.ToUInt64(value, CultureInfo.InvariantCulture)
+        };
+    }
 
     private static bool TryConvertWithTypeConverter(object value, Type target, out object? converted)
     {

@@ -6,16 +6,22 @@ using Microsoft.Extensions.Options;
 
 namespace Sample;
 
+public sealed class DevAuthOptions : AuthenticationSchemeOptions
+{
+    public bool Enabled { get; set; }
+}
+
 // Dev-only authentication handler: authenticates any loopback request that presents the
-// X-Dev-User header. It is registered only when ASPNETCORE_ENVIRONMENT=Development AND
+// X-Dev-User header. It is enabled only when ASPNETCORE_ENVIRONMENT=Development AND
 // DevAuth:Enabled=true. The Admin role is opt-in via DevAuth:GrantAdmin=true; remote addresses
 // require DevAuth:AllowRemote=true.
 //
 //   dotnet run --project Sample -- --DevAuth:Enabled=true
 //   curl -H 'X-Dev-User: mario' http://localhost:5000/api/users/5
 //
-// Requests without the header fall through to the default 401 challenge.
-public sealed class DevAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions>
+// When disabled the handler returns NoResult, so the scheme still provides a default 401
+// challenge instead of failing with "No authenticationScheme was specified".
+public sealed class DevAuthHandler : AuthenticationHandler<DevAuthOptions>
 {
     public const string SchemeName = "Dev";
     private const string HeaderName = "X-Dev-User";
@@ -24,18 +30,21 @@ public sealed class DevAuthHandler : AuthenticationHandler<AuthenticationSchemeO
     private readonly bool _grantAdmin;
     private readonly bool _allowRemote;
 
-    #pragma warning disable CS0618 // The current shared framework still only exposes the ISystemClock ctor.
-    public DevAuthHandler(IOptionsMonitor<AuthenticationSchemeOptions> options,
-        ILoggerFactory logger, UrlEncoder encoder, ISystemClock clock, IConfiguration configuration)
-        : base(options, logger, encoder, clock)
+    public DevAuthHandler(IOptionsMonitor<DevAuthOptions> options,
+        ILoggerFactory logger, UrlEncoder encoder, IConfiguration configuration)
+        : base(options, logger, encoder)
     {
         _grantAdmin = configuration.GetValue("DevAuth:GrantAdmin", false);
         _allowRemote = configuration.GetValue("DevAuth:AllowRemote", false);
     }
-    #pragma warning restore CS0618
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
+        if (!Options.Enabled)
+        {
+            return Task.FromResult(AuthenticateResult.NoResult());
+        }
+
         IPAddress? remote = Context.Connection.RemoteIpAddress;
 
         if (!_allowRemote && remote is not null && !IPAddress.IsLoopback(remote))
