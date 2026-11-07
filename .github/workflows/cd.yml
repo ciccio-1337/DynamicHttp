@@ -34,9 +34,8 @@ jobs:
       - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: nuget-login
         with:
-          # Must be the nuget.org account name, not the GitHub owner. Store it as a repository
-          # secret named NUGET_USER.
-          user: ${{ secrets.NUGET_USER }}
+          # The GitHub and nuget.org account names are the same for this repository.
+          user: ${{ github.repository_owner }}
       - run: |
           dotnet nuget push ./artifacts/*.nupkg \
             --source https://api.nuget.org/v3/index.json \
