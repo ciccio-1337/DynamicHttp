@@ -30,7 +30,6 @@ jobs:
           dotnet nuget push ./artifacts/*.nupkg \
             --source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
             --api-key ${{ secrets.GITHUB_TOKEN }} \
-            --username ${{ github.repository_owner }} \
             --skip-duplicate
       - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: nuget-login
