@@ -261,6 +261,53 @@ public sealed class AuthorizationTests
         Assert.Throws<DynamicHttpConfigurationException>(() => app.MapDynamicHttp());
     }
 
+    [Fact]
+    public async Task Authorization_is_enforced_without_authorization_middleware()
+    {
+        // Regression: authorization used to be metadata-only. If the application forgot
+        // app.UseAuthorization(), every [DynamicAuthorize] endpoint executed anonymously.
+        await using WebApplication app = await StartAppAsync(useAuthorization: false);
+        var client = app.GetTestClient();
+
+        Assert.Equal(HttpStatusCode.Unauthorized,
+            (await client.SendAsync(Request("/api/auth/policy"))).StatusCode);
+
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await client.SendAsync(Request("/api/auth/policy", User("mario")))).StatusCode);
+
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.SendAsync(Request("/api/auth/policy",
+                User("mario"),
+                Permission("read")))).StatusCode);
+    }
+
+    [Fact]
+    public async Task Allow_anonymous_works_without_authorization_middleware()
+    {
+        await using WebApplication app = await StartAppAsync(useAuthorization: false);
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/auth/public");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public void Mapping_requires_authorization_services_for_authorized_endpoints()
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddDynamicHttp(options =>
+            options.ScanAssemblies(typeof(AuthorizationService).Assembly));
+
+        using WebApplication app = builder.Build();
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(
+            () => app.MapDynamicHttp());
+
+        Assert.Contains("AddAuthorization", exception.Message, StringComparison.Ordinal);
+    }
+
     private static HttpRequestMessage Request(string path, params (string Name, string Value)[] headers)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, path);
@@ -281,7 +328,8 @@ public sealed class AuthorizationTests
 
     private static async Task<WebApplication> StartAppAsync(
         Action<DynamicHttpOptions>? configureOptions = null,
-        string defaultScheme = RejectingAuthHandler.SchemeName)
+        string defaultScheme = RejectingAuthHandler.SchemeName,
+        bool useAuthorization = true)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
@@ -300,7 +348,12 @@ public sealed class AuthorizationTests
         WebApplication app = builder.Build();
         app.UseDynamicHttpExceptionHandling();
         app.UseAuthentication();
-        app.UseAuthorization();
+
+        if (useAuthorization)
+        {
+            app.UseAuthorization();
+        }
+
         app.MapDynamicHttp();
 
         await app.StartAsync();

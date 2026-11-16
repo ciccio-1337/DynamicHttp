@@ -4,7 +4,9 @@ using System.Globalization;
 using System.Net;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.TestHost;
@@ -22,6 +24,7 @@ public sealed class IntegrationTests
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
+        builder.Services.AddAuthorization();
         builder.Services.AddDynamicHttp(options =>
         {
             options.ScanAssemblies(typeof(ValuesService).Assembly);
@@ -358,6 +361,7 @@ public sealed class IntegrationTests
         // (this test assembly) and register ValuesService from it.
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
+        builder.Services.AddAuthorization();
         builder.Services.AddDynamicHttp();
         await using WebApplication app = builder.Build();
         app.UseDynamicHttpExceptionHandling();
@@ -566,6 +570,7 @@ public sealed class IntegrationTests
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddAntiforgery();
+        builder.Services.AddAuthorization();
         builder.Services.AddDynamicHttp(options =>
             options.ScanAssemblies(typeof(ValuesService).Assembly));
 
@@ -751,6 +756,7 @@ public sealed class IntegrationTests
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
+        builder.Services.AddAuthorization();
         builder.Services.AddDynamicHttp(options =>
             options.ScanAssemblies(typeof(ValuesService).Assembly));
 
@@ -784,6 +790,7 @@ public sealed class IntegrationTests
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddAntiforgery();
+        builder.Services.AddAuthorization();
         builder.Services.AddDynamicHttp(options =>
             options.ScanAssemblies(typeof(ValuesService).Assembly));
 
@@ -806,6 +813,7 @@ public sealed class IntegrationTests
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddAntiforgery();
+        builder.Services.AddAuthorization();
         builder.Services.AddDynamicHttp(options =>
             options.ScanAssemblies(typeof(ValuesService).Assembly));
 
@@ -1067,12 +1075,107 @@ public sealed class IntegrationTests
         Assert.Equal(expected, response.StatusCode);
     }
 
+    [Fact]
+    public async Task Cookie_default_authentication_enables_antiforgery_for_unsafe_methods()
+    {
+        await using WebApplication app = await StartCookieAuthAppAsync();
+        var client = app.GetTestClient();
+
+        // Safe methods are unaffected.
+        Assert.Equal(HttpStatusCode.OK,
+            (await client.GetAsync("/api/values/plain")).StatusCode);
+
+        // POST without a token is rejected even though RequireAntiforgeryByDefault was not set.
+        var response = await client.PostAsync("/api/values/body",
+            new StringContent("""{"name":"mario","age":42}""", Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Explicit_antiforgery_opt_out_wins_over_cookie_default()
+    {
+        await using WebApplication app = await StartCookieAuthAppAsync(
+            options => options.RequireAntiforgeryByDefault = false);
+        var client = app.GetTestClient();
+
+        var response = await client.PostAsync("/api/values/body",
+            new StringContent("""{"name":"mario","age":42}""", Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Validation_errors_are_capped_and_the_response_is_bounded()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        string json = "[" + string.Join(",",
+            Enumerable.Repeat("""{"price":0}""", 50)) + "]";
+        var response = await client.PostAsync("/api/values/manylines",
+            new StringContent(json, Encoding.UTF8, "application/json"));
+        string body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("additional errors omitted", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("[49]", body, StringComparison.Ordinal);
+        Assert.True(body.Length < 4096, $"Response body was {body.Length} characters.");
+    }
+
+    [Fact]
+    public async Task Polymorphic_body_validation_uses_the_runtime_type()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var invalid = await client.PostAsync("/api/values/polymorphicbody",
+            new StringContent("""{"$type":"card","amount":0}""",
+                Encoding.UTF8, "application/json"));
+        string body = await invalid.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        Assert.Contains("Amount", body, StringComparison.Ordinal);
+
+        var valid = await client.PostAsync("/api/values/polymorphicbody",
+            new StringContent("""{"$type":"card","amount":10}""",
+                Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+    }
+
+    private static async Task<WebApplication> StartCookieAuthAppAsync(
+        Action<DynamicHttpOptions>? configureOptions = null)
+    {
+        WebApplicationBuilder builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddAntiforgery();
+        builder.Services.AddAuthorization();
+        builder.Services
+            .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+            .AddCookie();
+        builder.Services.AddDynamicHttp(options =>
+        {
+            options.ScanAssemblies(typeof(ValuesService).Assembly);
+            configureOptions?.Invoke(options);
+        });
+
+        WebApplication app = builder.Build();
+        app.UseRouting();
+        app.UseDynamicHttpExceptionHandling();
+        app.MapDynamicHttp();
+        await app.StartAsync();
+
+        return app;
+    }
+
     private static async Task<WebApplication> StartAntiforgeryAppAsync(
         Action<DynamicHttpOptions>? configureOptions = null)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Services.AddAntiforgery();
+        builder.Services.AddAuthorization();
         builder.Services.AddDynamicHttp(options =>
         {
             options.ScanAssemblies(typeof(ValuesService).Assembly);
@@ -1235,6 +1338,12 @@ public sealed class ValuesService
     [HttpPost("/rootcollectionbody")]
     public IResult RootCollectionBody([FromBody] List<CollectionBodyLine> lines) => Results.Ok(lines);
 
+    [HttpPost("/manylines")]
+    public IResult ManyLines([FromBody] List<CollectionBodyLine> lines) => Results.Ok(lines);
+
+    [HttpPost("/polymorphicbody")]
+    public IResult PolymorphicBody([FromBody] PaymentRequestBase payment) => Results.Ok(payment);
+
     [HttpGet("/arrayquery")]
     public string ArrayQuery([FromQuery] int[] ids) => string.Join(",", ids);
 
@@ -1362,6 +1471,18 @@ public sealed class CollectionBodyLine
 {
     [Range(1, 100)]
     public int Price { get; set; }
+}
+
+[JsonPolymorphic]
+[JsonDerivedType(typeof(CardPaymentRequest), "card")]
+public abstract class PaymentRequestBase
+{
+}
+
+public sealed class CardPaymentRequest : PaymentRequestBase
+{
+    [Range(1, 1000)]
+    public decimal Amount { get; set; }
 }
 
 public sealed class CustomTask<T>(T result) : Task<T>(() => result)

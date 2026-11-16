@@ -1,12 +1,13 @@
 using System.Net;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Xunit;
 
 namespace DynamicHttp.Tests;
 
-internal sealed record LogRecord(LogLevel Level, string Message);
+internal sealed record LogRecord(LogLevel Level, string Message, Exception? Exception = null);
 
 public sealed class LoggingTests
 {
@@ -43,6 +44,28 @@ public sealed class LoggingTests
 
         var error = Assert.Single(provider.Records, r => r.Level == LogLevel.Error);
         Assert.Contains(nameof(ExplodingService), error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Unexpected_exceptions_log_the_type_but_not_the_exception_at_error()
+    {
+        var provider = new CapturingLoggerProvider();
+        await using WebApplication app = await StartAppAsync(provider);
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/explode");
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+
+        // The exception object (and therefore its message, which may contain secrets) is only
+        // attached at Debug. The Error record carries a stable message with the exception type.
+        var error = Assert.Single(provider.Records, r => r.Level == LogLevel.Error);
+        Assert.Null(error.Exception);
+        Assert.Contains(nameof(InvalidOperationException), error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("boom", error.Message, StringComparison.Ordinal);
+
+        Assert.Contains(provider.Records,
+            r => r.Level == LogLevel.Debug && r.Exception is not null);
     }
 
     [Fact]
@@ -105,6 +128,8 @@ public sealed class LoggingTests
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         builder.Logging.AddProvider(provider);
+        builder.Logging.SetMinimumLevel(LogLevel.Debug);
+        builder.Services.AddAuthorization();
         builder.Services.AddDynamicHttp(options =>
             options.ScanAssemblies(typeof(ValuesService).Assembly));
 
@@ -148,7 +173,7 @@ internal sealed class CapturingLoggerProvider : ILoggerProvider
         {
             lock (provider._records)
             {
-                provider._records.Add(new LogRecord(logLevel, formatter(state, exception)));
+                provider._records.Add(new LogRecord(logLevel, formatter(state, exception), exception));
             }
         }
     }

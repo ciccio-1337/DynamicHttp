@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\DynamicHttp.csproj" />
+    <ProjectReference Include="..\Sample\Sample.csproj" />
     <ProjectReference Include="DynamicHttp.Tests.Fixtures\DynamicHttp.Tests.Fixtures.csproj" />
     <!-- The fixture project lives inside this project's directory tree, so the default **/*.cs glob
          would also compile its sources and generated assembly-info into this assembly. Exclude it. -->

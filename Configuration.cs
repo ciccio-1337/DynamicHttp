@@ -7,11 +7,18 @@ namespace DynamicHttp;
 
 public sealed class DynamicHttpOptions
 {
+    /// <summary>
+    /// Default maximum request body size (1 MiB). A smaller default than the server's usual
+    /// 30 MiB limit keeps JSON APIs from accepting unnecessarily large payloads. Set
+    /// <see cref="MaxRequestBodyBytes"/> to <c>null</c> to defer to the server limit.
+    /// </summary>
+    public const long DefaultMaxRequestBodyBytes = 1024 * 1024;
+
     private ServiceLifetime _defaultServiceLifetime = ServiceLifetime.Scoped;
     private bool _requireAuthorizationByDefault;
     private bool _requireAntiforgeryByDefault;
     private bool _validateModels = true;
-    private long? _maxRequestBodyBytes;
+    private long? _maxRequestBodyBytes = DefaultMaxRequestBodyBytes;
 
     internal List<Assembly> Assemblies { get; } = [];
 
@@ -74,9 +81,10 @@ public sealed class DynamicHttpOptions
     }
 
     /// <summary>
-    /// Optional maximum request body size, in bytes, applied to every dynamic endpoint before
-    /// binding. Requests that exceed the limit are rejected with 413. When null, the server's
-    /// default limit applies.
+    /// Maximum request body size, in bytes, applied to every dynamic endpoint before binding.
+    /// Requests that exceed the limit are rejected with 413. Defaults to
+    /// <see cref="DefaultMaxRequestBodyBytes"/> (1 MiB); set to <c>null</c> to use the server's
+    /// own limit.
     /// </summary>
     public long? MaxRequestBodyBytes
     {

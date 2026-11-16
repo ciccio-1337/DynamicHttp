@@ -11,6 +11,8 @@ namespace DynamicHttp;
 
 internal static class DynamicHttpBinding
 {
+    private const int MaxReportedErrors = 10;
+    private const int MaxReportedErrorLength = 1024;
     public static async ValueTask<object?> BindAsync(HttpContext context, ParameterDefinition definition)
     {
         return definition.Kind switch
@@ -63,17 +65,18 @@ internal static class DynamicHttpBinding
         }
 
         IReadOnlyList<ValidationResult> objectResults =
-            DynamicHttpValidation.Validate(value, services);
+            DynamicHttpValidation.Validate(value, services, out bool truncated);
 
         if (objectResults.Count > 0)
         {
-            throw new BadRequestHttpException(FormatErrors(definition.Name, objectResults));
+            throw new BadRequestHttpException(FormatErrors(definition.Name, objectResults, truncated));
         }
     }
 
-    private static string FormatErrors(string parameterName, IEnumerable<ValidationResult> results)
+    private static string FormatErrors(string parameterName, IEnumerable<ValidationResult> results,
+        bool truncated = false)
     {
-        string messages = string.Join("; ", results
+        string[] all = results
             .Where(result => !string.IsNullOrWhiteSpace(result.ErrorMessage))
             .Select(result =>
             {
@@ -81,13 +84,29 @@ internal static class DynamicHttpBinding
                     .FirstOrDefault(name => !string.IsNullOrWhiteSpace(name));
 
                 return string.IsNullOrEmpty(member)
-                    ? result.ErrorMessage
+                    ? result.ErrorMessage!
                     : $"{member}: {result.ErrorMessage}";
-            }));
+            })
+            .ToArray();
 
-        return messages.Length == 0
-            ? $"Parameter '{parameterName}' is not valid."
-            : $"Parameter '{parameterName}' is not valid: {messages}";
+        string messages = string.Join("; ", all.Take(MaxReportedErrors));
+
+        if (messages.Length == 0)
+        {
+            return $"Parameter '{parameterName}' is not valid.";
+        }
+
+        if (messages.Length > MaxReportedErrorLength)
+        {
+            messages = messages[..MaxReportedErrorLength] + "…";
+        }
+
+        if (all.Length > MaxReportedErrors || truncated)
+        {
+            messages += " (additional errors omitted)";
+        }
+
+        return $"Parameter '{parameterName}' is not valid: {messages}";
     }
 
     private static async ValueTask<object?> BindBodyAsync(HttpContext context, ParameterDefinition definition)

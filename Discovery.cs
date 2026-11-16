@@ -309,6 +309,18 @@ internal static class DynamicHttpDiscovery
                     "for properties that must not be bound.");
             }
 
+            string? constructorValidation =
+                DynamicHttpValidation.FindUnsupportedConstructorValidation(p.ParameterType);
+
+            if (constructorValidation is not null)
+            {
+                throw Configuration(serviceType, method,
+                    $"Body model '{p.ParameterType.Name}' declares a validation attribute only on " +
+                    $"constructor parameter '{constructorValidation}'. DataAnnotations validates " +
+                    "properties; annotate the matching property instead (for records use " +
+                    "[property: ...]).");
+            }
+
             requiresObjectValidation =
                 DynamicHttpValidation.RequiresObjectValidation(p.ParameterType);
 
@@ -637,10 +649,12 @@ internal static class DynamicHttpDiscovery
 
     /// <summary>
     /// Builds a canonical representation of a route template that ignores parameter names,
-    /// optional/default markers and constraint content, while preserving route precedence:
-    /// simple parameters, constrained parameters and catch-all parameters produce different keys.
-    /// Templates with the same key can match the same request and are checked for overlapping
-    /// constraints by <see cref="ValidateConflicts"/>.
+    /// optional/default markers, constraints and catch-all markers. Every route parameter is
+    /// represented by the same placeholder, so an unconstrained parameter is compared with a
+    /// constrained one: the unconstrained one can match the same request and route precedence
+    /// could otherwise let the constrained endpoint shadow its authorization. Templates with the
+    /// same key are passed to <see cref="ValidateConflicts"/>, which decides constraint
+    /// disjointness and fails closed when overlap cannot be ruled out.
     /// </summary>
     internal static string NormalizeRoute(string route)
     {
@@ -663,20 +677,8 @@ internal static class DynamicHttpDiscovery
                     case RoutePatternSeparatorPart separator:
                         builder.Append(separator.Content);
                         break;
-                    case RoutePatternParameterPart parameter:
-                        builder.Append('{');
-                        if (parameter.IsCatchAll)
-                        {
-                            builder.Append('*');
-                        }
-                        builder.Append('_');
-                        if (parameter.ParameterPolicies.Count > 0)
-                        {
-                            // Any constraint makes the parameter more specific than an
-                            // unconstrained one, regardless of the constraint content.
-                            builder.Append(":C");
-                        }
-                        builder.Append('}');
+                    case RoutePatternParameterPart:
+                        builder.Append("{_}");
                         break;
                 }
             }

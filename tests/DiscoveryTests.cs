@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 using DynamicHttp.Tests.Fixtures;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
@@ -177,15 +178,32 @@ public sealed class DiscoveryTests
     }
 
     [Fact]
-    public void Constrained_routes_are_not_treated_as_conflicts()
+    public void Constrained_and_unconstrained_overlapping_routes_conflict()
     {
+        // An unconstrained parameter matches everything the constrained one matches, and route
+        // precedence would send /api/42 to the constrained endpoint. Fail closed instead of
+        // allowing one route to shadow the other route's authorization metadata.
         EndpointDefinition[] endpoints =
         [
             CreateEndpoint("/api/{id}"),
             CreateEndpoint("/api/{id:int}")
         ];
 
-        DynamicHttpDiscovery.ValidateConflicts(endpoints);
+        Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateConflicts(endpoints));
+    }
+
+    [Fact]
+    public void Catch_all_and_parameter_routes_conflict()
+    {
+        EndpointDefinition[] endpoints =
+        [
+            CreateEndpoint("/api/{id}"),
+            CreateEndpoint("/api/{*path}")
+        ];
+
+        Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateConflicts(endpoints));
     }
 
     [Fact]
@@ -447,6 +465,81 @@ public sealed class DiscoveryTests
             DynamicHttpDiscovery.BuildParameters(typeof(BindNeverRootArrayService), method));
 
         Assert.Contains("Secret", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BindNever_on_body_model_type_throws_configuration_error()
+    {
+        var method = typeof(BindNeverTypeModelService)
+            .GetMethod(nameof(BindNeverTypeModelService.Post))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(BindNeverTypeModelService), method));
+
+        Assert.Contains("BindNever", exception.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(BindNeverTypeModel), exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BindNever_on_nested_body_model_type_throws_configuration_error()
+    {
+        var method = typeof(BindNeverNestedTypeModelService)
+            .GetMethod(nameof(BindNeverNestedTypeModelService.Post))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(BindNeverNestedTypeModelService), method));
+
+        Assert.Contains("Nested", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BindNever_on_record_constructor_parameter_throws_configuration_error()
+    {
+        var method = typeof(BindNeverRecordService)
+            .GetMethod(nameof(BindNeverRecordService.Post))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(BindNeverRecordService), method));
+
+        Assert.Contains("constructor parameter", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Secret", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BindNever_on_polymorphic_derived_property_throws_configuration_error()
+    {
+        var method = typeof(BindNeverPolymorphicService)
+            .GetMethod(nameof(BindNeverPolymorphicService.Post))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(BindNeverPolymorphicService), method));
+
+        Assert.Contains("BindNever", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Validation_attribute_on_record_constructor_parameter_throws_configuration_error()
+    {
+        var method = typeof(ConstructorValidationService)
+            .GetMethod(nameof(ConstructorValidationService.Post))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(ConstructorValidationService), method));
+
+        Assert.Contains("constructor parameter", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("[property:", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Validation_attribute_on_record_property_is_accepted()
+    {
+        var method = typeof(PropertyValidationService)
+            .GetMethod(nameof(PropertyValidationService.Post))!;
+
+        ParameterDefinition parameter = Assert.Single(
+            DynamicHttpDiscovery.BuildParameters(typeof(PropertyValidationService), method));
+
+        Assert.True(parameter.RequiresObjectValidation);
     }
 
     [Fact]
@@ -858,4 +951,71 @@ public sealed class DiscoveryTests
     {
         public string Get(Span<int> values) => values.Length.ToString();
     }
+
+    private sealed class BindNeverTypeModelService
+    {
+        public string Post([FromBody] BindNeverTypeModel body) => body.Name;
+    }
+
+    [BindNever]
+    private sealed class BindNeverTypeModel
+    {
+        public string Name { get; set; } = string.Empty;
+    }
+
+    private sealed class BindNeverNestedTypeModelService
+    {
+        public string Post([FromBody] BindNeverNestedTypeModel body) => body.Nested.Name;
+    }
+
+    private sealed class BindNeverNestedTypeModel
+    {
+        public BindNeverNestedTypeChild Nested { get; set; } = new();
+    }
+
+    [BindNever]
+    private sealed class BindNeverNestedTypeChild
+    {
+        public string Name { get; set; } = string.Empty;
+    }
+
+    private sealed class BindNeverRecordService
+    {
+        public string Post([FromBody] BindNeverRecord body) => body.Secret;
+    }
+
+    private sealed record BindNeverRecord([BindNever] string Secret);
+
+    private sealed class BindNeverPolymorphicService
+    {
+        public string Post([FromBody] BindNeverPolymorphicBase body) => body.GetType().Name;
+    }
+
+    [JsonPolymorphic]
+    [JsonDerivedType(typeof(BindNeverPolymorphicDerived), "derived")]
+    private abstract class BindNeverPolymorphicBase
+    {
+    }
+
+    private sealed class BindNeverPolymorphicDerived : BindNeverPolymorphicBase
+    {
+        [BindNever]
+        public string Secret { get; set; } = string.Empty;
+    }
+
+    private sealed class ConstructorValidationService
+    {
+        public string Post([FromBody] ConstructorValidatedRecord body) =>
+            body.Quantity.ToString();
+    }
+
+    private sealed record ConstructorValidatedRecord([Range(1, 10)] int Quantity);
+
+    private sealed class PropertyValidationService
+    {
+        public string Post([FromBody] PropertyValidatedRecord body) =>
+            body.Quantity.ToString();
+    }
+
+    private sealed record PropertyValidatedRecord([property: Range(1, 10)] int Quantity);
 }

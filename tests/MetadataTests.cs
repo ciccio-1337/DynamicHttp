@@ -14,6 +14,7 @@ public sealed class MetadataTests
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
+        builder.Services.AddAuthorization();
         builder.Services.AddDynamicHttp(options =>
             options.ScanAssemblies(typeof(MetadataService).Assembly));
 

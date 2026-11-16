@@ -1,13 +1,17 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Authorization.Policy;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace DynamicHttp;
 
@@ -30,6 +34,8 @@ public sealed class DynamicHttpRegistry
     internal bool RequireAuthorizationByDefault => _options.RequireAuthorizationByDefault;
 
     internal bool RequireAntiforgeryByDefault => _options.RequireAntiforgeryByDefault;
+
+    internal bool RequireAntiforgeryByDefaultSet => _options.RequireAntiforgeryByDefaultSet;
 
     internal bool ValidateModels => _options.ValidateModels;
 
@@ -59,13 +65,37 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
                 "DynamicHttp configuration error: AddDynamicHttp() must be called before MapDynamicHttp().");
         }
 
-        if (registry.RequireAuthorizationByDefault &&
-            endpoints.ServiceProvider.GetService<IAuthorizationPolicyProvider>() is null)
+        bool hasAuthorizationMetadata = registry.RequireAuthorizationByDefault ||
+            registry.Definitions.Any(definition =>
+                definition.Authorization.Count > 0 && !definition.AllowAnonymous);
+
+        if (hasAuthorizationMetadata &&
+            (endpoints.ServiceProvider.GetService<IAuthorizationService>() is null ||
+                endpoints.ServiceProvider.GetService<IAuthorizationPolicyProvider>() is null ||
+                endpoints.ServiceProvider.GetService<IPolicyEvaluator>() is null))
         {
             throw new DynamicHttpConfigurationException(
-                "DynamicHttp configuration error: RequireAuthorizationByDefault requires authorization services. " +
-                "Call AddAuthorization()/AddAuthorizationBuilder() when registering services and add " +
-                "UseAuthentication()/UseAuthorization() to the pipeline.");
+                "DynamicHttp configuration error: endpoints that require authorization need " +
+                "AddAuthorization()/AddAuthorizationBuilder(). DynamicHttp enforces authorization " +
+                "itself, so this fails at startup instead of allowing anonymous access. " +
+                "UseAuthentication() is still required to populate HttpContext.User.");
+        }
+
+        bool requireAntiforgeryByDefault = registry.RequireAntiforgeryByDefault;
+
+        if (!registry.RequireAntiforgeryByDefaultSet &&
+            UsesCookieAuthenticationByDefault(endpoints.ServiceProvider))
+        {
+            // Cookie authentication is the default scheme and the application did not make an
+            // explicit antiforgery choice. Enable CSRF protection for unsafe methods; registering
+            // AddAntiforgery() is still required, and the check fails closed without it.
+            requireAntiforgeryByDefault = true;
+            endpoints.ServiceProvider.GetService<ILoggerFactory>()
+                ?.CreateLogger("DynamicHttp")
+                .LogWarning(
+                    "DynamicHttp: the default authentication scheme uses cookies, so antiforgery " +
+                    "validation is enabled for unsafe methods. Register AddAntiforgery() and send a " +
+                    "token, or explicitly set RequireAntiforgeryByDefault = false to opt out.");
         }
 
         foreach (var definition in registry.Definitions)
@@ -82,6 +112,14 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
 
                     try
                     {
+                        // Enforce authorization first: a rejected request must not parse a body or
+                        // consume an antiforgery token. This makes authorization fail closed even
+                        // when the application forgot app.UseAuthorization().
+                        if (!await AuthorizeAsync(context))
+                        {
+                            return Results.Empty;
+                        }
+
                         // Enforce the body limit first: antiforgery may read a form body, so an
                         // oversized request must be rejected before any body parsing happens.
                         EnforceRequestBodyLimit(context, registry.MaxRequestBodyBytes);
@@ -90,7 +128,7 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
                         // such as GET: the developer deliberately opted in. The option only infers
                         // the requirement for methods that can change state.
                         if (definition.RequireAntiforgery ||
-                            (registry.RequireAntiforgeryByDefault &&
+                            (requireAntiforgeryByDefault &&
                                 !IsSafeMethod(definition.HttpMethod)))
                         {
                             await ValidateAntiforgeryAsync(context);
@@ -122,10 +160,24 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
                         if (!IsClientDisconnect(exception, context.RequestAborted))
                         {
                             context.Items[DynamicHttpExceptionHandler.LoggedExceptionItemKey] = true;
-                            logger.LogError(exception,
-                                "DynamicHttp invocation failed for {Service}.{Method}",
+
+                            // Do not attach the exception object at Error: messages from the
+                            // endpoint or a downstream library can contain connection strings,
+                            // query parameters or PII. Keep a stable message and the exception
+                            // type; the full exception is available at Debug for diagnostics.
+                            logger.LogError(
+                                "DynamicHttp invocation failed for {Service}.{Method} with {ExceptionType}",
                                 definition.ServiceType.Name,
-                                definition.Method.Name);
+                                definition.Method.Name,
+                                exception.GetType().FullName);
+
+                            if (logger.IsEnabled(LogLevel.Debug))
+                            {
+                                logger.LogDebug(exception,
+                                    "DynamicHttp invocation failed for {Service}.{Method}",
+                                    definition.ServiceType.Name,
+                                    definition.Method.Name);
+                            }
                         }
 
                         throw;
@@ -188,6 +240,122 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
         MappedBuilders.Add(endpoints, new object());
 
         return endpoints;
+    }
+
+    /// <summary>
+    /// Enforces the endpoint's effective authorization policy inside the mapped delegate. This
+    /// mirrors <c>AuthorizationMiddleware</c> so the result is the same when
+    /// <c>UseAuthorization()</c> is present, and fails closed when it is missing. The endpoint
+    /// metadata is the single source of truth, so application-added <c>[Authorize]</c> metadata
+    /// and a configured fallback policy are honored too.
+    /// </summary>
+    internal static async Task<bool> AuthorizeAsync(HttpContext context)
+    {
+        Endpoint? endpoint = context.GetEndpoint();
+
+        if (endpoint is null || endpoint.Metadata.GetMetadata<IAllowAnonymous>() is not null)
+        {
+            return true;
+        }
+
+        IAuthorizationPolicyProvider policyProvider = context.RequestServices
+            .GetRequiredService<IAuthorizationPolicyProvider>();
+
+        IReadOnlyList<IAuthorizeData> authorizeData =
+            endpoint.Metadata.GetOrderedMetadata<IAuthorizeData>();
+        IReadOnlyList<AuthorizationPolicy> policies =
+            endpoint.Metadata.GetOrderedMetadata<AuthorizationPolicy>();
+
+        AuthorizationPolicy? policy = authorizeData.Count == 0 && policies.Count == 0
+            ? await policyProvider.GetFallbackPolicyAsync()
+            : await AuthorizationPolicy.CombineAsync(policyProvider, authorizeData, policies);
+
+        if (policy is null)
+        {
+            // No authorize metadata and no fallback policy: anonymous access is intentional.
+            return true;
+        }
+
+        IPolicyEvaluator evaluator = context.RequestServices.GetRequiredService<IPolicyEvaluator>();
+        AuthenticateResult authentication = await evaluator.AuthenticateAsync(policy, context);
+        PolicyAuthorizationResult result = await evaluator.AuthorizeAsync(
+            policy, authentication, context, context);
+
+        if (result.Succeeded)
+        {
+            return true;
+        }
+
+        await ChallengeOrForbidAsync(context, policy, result.Forbidden);
+
+        return false;
+    }
+
+    private static async Task ChallengeOrForbidAsync(HttpContext context,
+        AuthorizationPolicy policy,
+        bool forbid)
+    {
+        if (policy.AuthenticationSchemes.Count > 0)
+        {
+            foreach (string scheme in policy.AuthenticationSchemes)
+            {
+                if (forbid)
+                {
+                    await context.ForbidAsync(scheme);
+                }
+                else
+                {
+                    await context.ChallengeAsync(scheme);
+                }
+            }
+
+            return;
+        }
+
+        if (forbid)
+        {
+            await context.ForbidAsync();
+        }
+        else
+        {
+            await context.ChallengeAsync();
+        }
+    }
+
+    /// <summary>
+    /// True when the default authentication scheme is a cookie handler. Cookie-authenticated
+    /// applications are exposed to CSRF on unsafe methods, so antiforgery is enabled by default
+    /// unless the application made an explicit choice.
+    /// </summary>
+    internal static bool UsesCookieAuthenticationByDefault(IServiceProvider services)
+    {
+        AuthenticationOptions? options = services
+            .GetService<IOptions<AuthenticationOptions>>()?.Value;
+
+        string? defaultScheme = options?.DefaultScheme ??
+            options?.DefaultAuthenticateScheme ??
+            options?.DefaultChallengeScheme;
+
+        if (string.IsNullOrEmpty(defaultScheme))
+        {
+            return false;
+        }
+
+        IAuthenticationSchemeProvider? provider = services
+            .GetService<IAuthenticationSchemeProvider>();
+
+        if (provider is null)
+        {
+            return false;
+        }
+
+        AuthenticationScheme? scheme = provider
+            .GetSchemeAsync(defaultScheme)
+            .GetAwaiter()
+            .GetResult();
+
+        return scheme is not null &&
+            typeof(CookieAuthenticationHandler).IsAssignableFrom(scheme.HandlerType);
     }
 
     internal static async Task ValidateAntiforgeryAsync(HttpContext context)

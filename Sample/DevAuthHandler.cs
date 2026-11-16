@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Claims;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 
 namespace Sample;
@@ -26,21 +27,28 @@ public sealed class DevAuthHandler : AuthenticationHandler<DevAuthOptions>
     public const string SchemeName = "Dev";
     private const string HeaderName = "X-Dev-User";
     private const string PolicyClaimType = "users.read";
+    private const int MaxUserNameLength = 256;
 
     private readonly bool _grantAdmin;
     private readonly bool _allowRemote;
+    private readonly bool _isDevelopment;
 
     public DevAuthHandler(IOptionsMonitor<DevAuthOptions> options,
-        ILoggerFactory logger, UrlEncoder encoder, IConfiguration configuration)
+        ILoggerFactory logger, UrlEncoder encoder, IConfiguration configuration,
+        IHostEnvironment environment)
         : base(options, logger, encoder)
     {
         _grantAdmin = configuration.GetValue("DevAuth:GrantAdmin", false);
         _allowRemote = configuration.GetValue("DevAuth:AllowRemote", false);
+
+        // Defense in depth: Program.cs also gates registration on IsDevelopment(), but the handler
+        // must never authenticate outside Development even if the options are enabled by mistake.
+        _isDevelopment = environment.IsDevelopment();
     }
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
-        if (!Options.Enabled)
+        if (!Options.Enabled || !_isDevelopment)
         {
             return Task.FromResult(AuthenticateResult.NoResult());
         }
@@ -64,11 +72,19 @@ public sealed class DevAuthHandler : AuthenticationHandler<DevAuthOptions>
             }
         }
 
-        string? user = Request.Headers[HeaderName].FirstOrDefault();
+        string? user = Request.Headers[HeaderName].FirstOrDefault()?.Trim();
 
-        if (string.IsNullOrWhiteSpace(user))
+        if (string.IsNullOrEmpty(user))
         {
             return Task.FromResult(AuthenticateResult.Fail($"Missing '{HeaderName}' header."));
+        }
+
+        // Keep the development identity bounded and free of control characters: the claim value
+        // is application-visible and may end up in logs or responses.
+        if (user.Length > MaxUserNameLength || user.Any(char.IsControl))
+        {
+            return Task.FromResult(AuthenticateResult.Fail(
+                $"The '{HeaderName}' header is invalid."));
         }
 
         List<Claim> claims =

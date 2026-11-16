@@ -148,11 +148,23 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
                 {
                     // DynamicHttp endpoints log unexpected exceptions with service/method context;
                     // only log here when the exception did not come from a mapped endpoint.
-                    logger.LogError(exception,
-                        "Unhandled DynamicHttp exception for {Method} {Path}. TraceId: {TraceId}",
+                    // Only the exception type is logged at Error; the full exception (which may
+                    // contain secrets copied from the request) is available at Debug.
+                    logger.LogError(
+                        "Unhandled DynamicHttp exception for {Method} {Path} with {ExceptionType}. TraceId: {TraceId}",
                         method,
                         path,
+                        exception.GetType().FullName,
                         traceId);
+
+                    if (logger.IsEnabled(LogLevel.Debug))
+                    {
+                        logger.LogDebug(exception,
+                            "Unhandled DynamicHttp exception for {Method} {Path}. TraceId: {TraceId}",
+                            method,
+                            path,
+                            traceId);
+                    }
                 }
             }
 
@@ -202,7 +214,10 @@ public sealed class DynamicHttpExceptionHandler(RequestDelegate next, ILogger<Dy
             return SanitizeForLog(route);
         }
 
-        return SanitizeForLog(context.Request.Path.Value);
+        // Without a route template there is no way to tell which path segments are safe. Tokens,
+        // reset secrets and PII routinely live in paths (for example /password-reset/<token>), so
+        // log a fixed placeholder instead of the concrete path.
+        return "(unmatched request)";
     }
 
     private static string TitleFor(int statusCode) => statusCode switch

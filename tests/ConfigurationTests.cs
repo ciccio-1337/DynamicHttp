@@ -84,6 +84,24 @@ public sealed class ConfigurationTests
     }
 
     [Fact]
+    public void Default_body_limit_is_one_mebibyte()
+    {
+        var options = new DynamicHttpOptions();
+
+        Assert.Equal(1024 * 1024, DynamicHttpOptions.DefaultMaxRequestBodyBytes);
+        Assert.Equal(DynamicHttpOptions.DefaultMaxRequestBodyBytes,
+            options.MaxRequestBodyBytes);
+    }
+
+    [Fact]
+    public void Body_limit_can_be_disabled_explicitly()
+    {
+        var options = new DynamicHttpOptions { MaxRequestBodyBytes = null };
+
+        Assert.Null(options.MaxRequestBodyBytes);
+    }
+
+    [Fact]
     public void AddDynamicHttp_rejects_factory_registered_options()
     {
         var services = new ServiceCollection();

@@ -113,6 +113,10 @@ DataAnnotations validation is applied after binding:
 - Attributes on a parameter, such as `[FromQuery, Range(1, 10)] int page`, are validated for every binding source.
 - Body models are validated recursively, including complex properties and collection elements. A body that is itself a collection (`List<T>`, `T[]`, `List<List<T>>`) is validated element by element. Nested errors carry their object path (for example `Child.Price`, `Lines[0].Price` or `[0].Price`). Object cycles are handled without recursing forever.
 - Validation metadata is discovered once at startup; the plan for a body type is built during discovery, and runtime-derived types are planned on first use and cached. Types with validation metadata anywhere in their reachable object graph are validated; types without any are not reflected over per request.
+- Type-level validation metadata is enforced: `[CustomValidation]` (or any `ValidationAttribute`) on the model class and `IValidatableObject` implementations run with the rest of the graph.
+- Polymorphic inputs are validated against their runtime type. Declared `[JsonDerivedType]` targets are traversed, and abstract, interface or `[JsonPolymorphic]` roots always trigger validation so annotations on a derived type cannot be skipped. All non-sealed reference types do the same, so a custom JSON type resolver cannot bypass runtime validation.
+- A validation attribute placed only on a constructor (or record positional) parameter is a startup configuration error: DataAnnotations validates properties, so the attribute would otherwise do nothing. For records use `[property: Range(1, 10)]`.
+- At most 10 validation errors are reported and the formatted message is capped at 1024 characters (with an "additional errors omitted" marker), so a large invalid collection cannot amplify the response.
 - Invalid input returns 400 ProblemDetails. Error messages never include the raw request value.
 - Set `options.ValidateModels = false` to disable DataAnnotations validation for both parameters
   and body models (it defaults to `true`). Binding and type conversion still run.
@@ -121,7 +125,7 @@ DynamicHttp binds the whole JSON body, so the MVC-only `[BindNever]` attribute c
 
 ## Request body limit
 
-Set `options.MaxRequestBodyBytes` to reject oversized payloads with `413 Payload Too Large`. The limit is enforced before antiforgery validation, so a large form body is rejected without being parsed. The limit applies to both `Content-Length` and chunked bodies. When unset, the server's own limit applies.
+Set `options.MaxRequestBodyBytes` to reject oversized payloads with `413 Payload Too Large`. The limit defaults to 1 MiB (`DynamicHttpOptions.DefaultMaxRequestBodyBytes`); set it to `null` to defer to the server's own limit. The limit is enforced before antiforgery validation, so a large form body is rejected without being parsed. The limit applies to both `Content-Length` and chunked bodies.
 
 - A declared `Content-Length` above the limit is rejected immediately.
 - When the server exposes a writable `IHttpMaxRequestBodySizeFeature`, the limit is lowered but never raised above an existing lower server limit.
@@ -141,7 +145,7 @@ The framework `[Authorize]` and `[AllowAnonymous]` attributes are honored too an
 
 Authorization and allow-anonymous metadata declared on interfaces is honored as well, at both type and method level. This keeps a contract such as `interface IUserService { [DynamicAuthorize] Task<User> Get(); }` protected when implemented by a discovered service. The built-in framework `[Authorize]` cannot be placed on an interface type (its own `AttributeUsage` does not allow it), and a framework `[AllowAnonymous]` cannot be placed on an interface member either; use the DynamicHttp attributes there.
 
-Set `options.RequireAuthorizationByDefault = true` to make authentication the default: every endpoint without `[DynamicAuthorize]`, framework `[Authorize]`, or an allow-anonymous marker requires an authenticated user. Mapping fails fast when authorization services are not registered (`AddAuthorization()` or `AddAuthorizationBuilder()`) and when `RequireAuthorizationByDefault` conflicts across `AddDynamicHttp` calls. The library cannot detect a missing `UseAuthorization()` in the pipeline: endpoint authorization metadata is only enforced when `UseAuthentication()`/`UseAuthorization()` are registered before `MapDynamicHttp()`.
+Set `options.RequireAuthorizationByDefault = true` to make authentication the default: every endpoint without `[DynamicAuthorize]`, framework `[Authorize]`, or an allow-anonymous marker requires an authenticated user. Mapping fails fast when authorization services are not registered (`AddAuthorization()` or `AddAuthorizationBuilder()`) and when `RequireAuthorizationByDefault` conflicts across `AddDynamicHttp` calls. Authorization is enforced by the mapped request delegate itself, using the endpoint's effective policy (including a configured fallback policy), so it fails closed even when `app.UseAuthorization()` is missing. `app.UseAuthentication()` is still required to populate `HttpContext.User`; when it is absent, protected endpoints challenge with 401.
 
 ### Antiforgery (CSRF)
 
@@ -149,6 +153,7 @@ Mark cookie-authenticated endpoints with `[DynamicAntiforgery]` (method or class
 
 - An explicit `[DynamicAntiforgery]` is always enforced, including on `GET` and custom verbs. The developer deliberately opted in, so the attribute is not filtered by HTTP method.
 - Set `options.RequireAntiforgeryByDefault = true` to require a token on every endpoint whose method is not safe. `GET`, `HEAD`, `OPTIONS` and `TRACE` are treated as safe; all other methods, including custom verbs, require a token. The option defaults to `false`, can be merged across `AddDynamicHttp` calls, and conflicting values throw at startup.
+- When the application's **default** authentication scheme is a cookie handler and `RequireAntiforgeryByDefault` was not set explicitly, antiforgery is enabled automatically for unsafe methods and a startup warning explains how to register `AddAntiforgery()` or opt out. This closes the CSRF gap for cookie-authenticated endpoints that predate the option. An explicit value, including `false`, always wins.
 
 ## Exceptions
 
@@ -156,10 +161,10 @@ Register `UseDynamicHttpExceptionHandling()` in the pipeline; it converts except
 
 - `IHttpException` / `HttpException` (for example `BadRequestHttpException`, `NotFoundHttpException`, `PayloadTooLargeHttpException`) maps to its `StatusCode` and is logged at Information with a stable message that does not contain exception messages or request values.
 - Framework `BadHttpRequestException` responses (for example a server-level body limit) are returned as client errors without echoing their message.
-- An unexpected exception returns a 500 ProblemDetails with a `traceId` and does not expose the exception message or stack trace. It is logged once at Error with the service/method context.
+- An unexpected exception returns a 500 ProblemDetails with a `traceId` and does not expose the exception message or stack trace. It is logged once at Error with the service/method context and the exception **type only**; the full exception (whose message may contain request values or secrets) is attached only at Debug.
 - A cancellation or an I/O failure caused by the client disconnecting (`RequestAborted`, including `IOException`/`ConnectionResetException`) is not logged as an error.
 
-Exception logs use the endpoint's route template (for example `/api/users/{id}`) instead of the concrete request path, so path segments cannot leak tokens or PII into logs. When no route template is available the path is used after sanitization. The HTTP method and trace identifier are sanitized as well; control characters, Unicode format characters (including bidi controls) and line/paragraph separators are replaced.
+Exception logs use the endpoint's route template (for example `/api/users/{id}`) instead of the concrete request path, so path segments cannot leak tokens or PII into logs. When no route template is available the logger uses the fixed placeholder `(unmatched request)` instead of the concrete path. The HTTP method and trace identifier are sanitized as well; control characters, Unicode format characters (including bidi controls) and line/paragraph separators are replaced.
 
 All log messages are written through structured logging parameters. DynamicHttp-controlled details returned to the client come from `HttpException.Detail`; that message is client-visible, so never put secrets, credentials or internal implementation data in it.
 
@@ -171,7 +176,7 @@ All log messages are written through structured logging parameters. DynamicHttp-
 
 The `Sample/` app is a demo and is never packed or published. Its launch profile sets
 `ASPNETCORE_ENVIRONMENT=Development`; the development authentication handler is still disabled
-unless `DevAuth:Enabled=true` is passed. It only authenticates loopback requests: the remote IP must be loopback (a missing remote address fails closed) and the `Host` header must be `localhost`, `127.0.0.1` or `[::1]`. The loopback IP check prevents DNS-rebinding and non-local clients from using the dev identity provider. Note that a local reverse proxy which connects over loopback and forwards its own `Host` header is not distinguished from a direct local request, so never expose this handler outside development. When disabled, the scheme is still the default one and challenges protected endpoints with 401:
+unless `DevAuth:Enabled=true` is passed. The handler itself also refuses to authenticate when the environment is not Development, even if the option is enabled by mistake. It only authenticates loopback requests: the remote IP must be loopback (a missing remote address fails closed) and the `Host` header must be `localhost`, `127.0.0.1` or `[::1]`. The loopback IP check prevents DNS-rebinding and non-local clients from using the dev identity provider. The `X-Dev-User` value is trimmed, limited to 256 characters and rejected when it contains control characters. Note that a local reverse proxy which connects over loopback and forwards its own `Host` header is not distinguished from a direct local request, so never expose this handler outside development. When disabled, the scheme is still the default one and challenges protected endpoints with 401:
 
 ```bash
 dotnet run --project Sample -- --DevAuth:Enabled=true
@@ -191,5 +196,8 @@ Custom HTTP verbs can be added by deriving from `HttpMethodAttribute` and overri
 Route conflicts are detected at startup, including optional/default parameters and overlapping
 constraints (for example `{id:int}` vs `{id:min(1)}`, or `{id:int}` vs `{id:datetime}` because
 `DateTime.TryParse` also accepts numeric values), while clearly disjoint constraints such as
-`{id:int}` and `{id:guid}` remain allowed. Detection fails closed: constraints whose overlap
+`{id:int}` and `{id:guid}` remain allowed. An unconstrained parameter conflicts with any
+constrained parameter on the same segment (`{id}` vs `{id:int}`) and with a catch-all
+(`{*path}`), because route precedence could otherwise let one endpoint shadow the other's
+authorization. Detection fails closed: constraints whose overlap
 cannot be ruled out (custom, unknown or regex constraints) are reported as conflicts.
