@@ -1,9 +1,11 @@
+using System.Collections;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Primitives;
 
 namespace DynamicHttp;
 
@@ -20,8 +22,8 @@ internal static class DynamicHttpBinding
             BindingKind.HttpResponse => context.Response,
             BindingKind.User => context.User,
             BindingKind.Route => ConvertValue(context.Request.RouteValues[definition.Name], definition),
-            BindingKind.Query => ConvertValue(context.Request.Query[definition.Name].FirstOrDefault(), definition),
-            BindingKind.Header => ConvertValue(context.Request.Headers[definition.Name].FirstOrDefault(), definition),
+            BindingKind.Query => BindValues(context.Request.Query[definition.Name], definition),
+            BindingKind.Header => BindValues(context.Request.Headers[definition.Name], definition),
             BindingKind.Body => await BindBodyAsync(context, definition),
             _ => throw new ArgumentOutOfRangeException(nameof(definition.Kind))
         };
@@ -124,6 +126,100 @@ internal static class DynamicHttpBinding
         }
 
         return body;
+    }
+
+    /// <summary>
+    /// Binds a query/header value source. Array and collection parameters receive every value
+    /// (for example <c>?ids=1&amp;ids=2</c>); scalar parameters keep the first value, which is the
+    /// behavior of previous versions.
+    /// </summary>
+    private static object? BindValues(StringValues values, ParameterDefinition definition)
+    {
+        if (!TryGetCollectionElementType(definition.ParameterType, out Type elementType))
+        {
+            return ConvertValue(values.FirstOrDefault(), definition);
+        }
+
+        ParameterDefinition elementDefinition = definition with { ParameterType = elementType };
+
+        List<object?> items = [];
+
+        foreach (string? value in values)
+        {
+            items.Add(ConvertValue(value, elementDefinition));
+        }
+
+        if (definition.ParameterType.IsArray)
+        {
+            Array array = Array.CreateInstance(elementType, items.Count);
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                array.SetValue(items[i], i);
+            }
+
+            return array;
+        }
+
+        Type listType = typeof(List<>).MakeGenericType(elementType);
+        IList list = (IList)Activator.CreateInstance(listType)!;
+
+        foreach (object? item in items)
+        {
+            list.Add(item);
+        }
+
+        return list;
+    }
+
+    /// <summary>
+    /// Detects array and collection targets that <see cref="List{T}"/> can satisfy. Types that
+    /// only implement <see cref="IEnumerable{T}"/> through a different concrete collection (for
+    /// example <c>HashSet&lt;T&gt;</c>) are not bound as collections and fall back to the scalar
+    /// path, which reports a 400 instead of failing later at invocation time.
+    /// </summary>
+    private static bool TryGetCollectionElementType(Type type, out Type elementType)
+    {
+        if (type == typeof(string))
+        {
+            elementType = type;
+
+            return false;
+        }
+
+        if (type.IsArray)
+        {
+            elementType = type.GetElementType()!;
+
+            return true;
+        }
+
+        Type[] interfaces = type.IsInterface
+            ? [type, .. type.GetInterfaces()]
+            : type.GetInterfaces();
+
+        foreach (Type candidate in interfaces)
+        {
+            if (candidate.IsGenericType &&
+                candidate.GetGenericTypeDefinition() == typeof(IEnumerable<>))
+            {
+                Type candidateElement = candidate.GetGenericArguments()[0];
+                Type listType = typeof(List<>).MakeGenericType(candidateElement);
+
+                if (type.IsAssignableFrom(listType))
+                {
+                    elementType = candidateElement;
+
+                    return true;
+                }
+
+                break;
+            }
+        }
+
+        elementType = type;
+
+        return false;
     }
 
     private static object? ConvertValue(object? value, ParameterDefinition definition)
@@ -291,12 +387,21 @@ internal static class DynamicHttpBinding
 
         try
         {
-            converted = converter.ConvertFromInvariantString(value.ToString()!);
+            object? result = converter.ConvertFromInvariantString(value.ToString()!);
+
+            // A converter that returns null cannot satisfy a non-nullable value type. Returning
+            // true here would let the binder unbox null at invocation time and produce a 500.
+            if (result is null && target.IsValueType && Nullable.GetUnderlyingType(target) is null)
+            {
+                return false;
+            }
+
+            converted = result;
 
             return true;
         }
         catch (Exception exception) when (exception is FormatException or NotSupportedException or
-            ArgumentException or OverflowException)
+            ArgumentException or OverflowException or InvalidCastException)
         {
             return false;
         }

@@ -218,4 +218,27 @@ public sealed class AwaitingTests
 
         Assert.Equal("x", result);
     }
+
+    [Fact]
+    public async Task Non_generic_task_returns_null()
+    {
+        Assert.Null(await DynamicHttpAwaiting.AwaitAsync(Task.CompletedTask));
+    }
+
+    [Fact]
+    public async Task Non_generic_task_subclass_with_unrelated_result_returns_null()
+    {
+        // Before the fix the accessor was built from any property named "Result" on the runtime
+        // type, so this subclass produced "wrong" instead of null.
+        object? result = await DynamicHttpAwaiting.AwaitAsync(new NonGenericTaskWithResult());
+
+        Assert.Null(result);
+    }
+
+    private sealed class NonGenericTaskWithResult : Task
+    {
+        public NonGenericTaskWithResult() : base(static () => { }) => Start();
+
+        public object? Result => "wrong";
+    }
 }

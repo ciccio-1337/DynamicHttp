@@ -69,6 +69,54 @@ public sealed class ValidationTests
         Assert.False(DynamicHttpValidation.RequiresObjectValidation(typeof(PlainRequest)));
     }
 
+    [Fact]
+    public void Root_collection_body_is_validated()
+    {
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var request = new List<CollectionLine> { new() { Price = 0 } };
+
+        var results = DynamicHttpValidation.Validate(request, provider);
+
+        var result = Assert.Single(results);
+        Assert.Contains("[0].Price", result.MemberNames);
+    }
+
+    [Fact]
+    public void Root_array_body_is_validated()
+    {
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        CollectionLine[] request = [new CollectionLine { Price = 0 }];
+
+        var results = DynamicHttpValidation.Validate(request, provider);
+
+        var result = Assert.Single(results);
+        Assert.Contains("[0].Price", result.MemberNames);
+    }
+
+    [Fact]
+    public void Nested_root_collection_body_is_validated()
+    {
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var request = new List<List<CollectionLine>>
+        {
+            new() { new CollectionLine { Price = 0 } }
+        };
+
+        var results = DynamicHttpValidation.Validate(request, provider);
+
+        var result = Assert.Single(results);
+        Assert.Contains("[0][0].Price", result.MemberNames);
+    }
+
+    [Fact]
+    public void Validation_requirement_is_detected_for_collection_roots()
+    {
+        Assert.True(DynamicHttpValidation.RequiresObjectValidation(typeof(List<CollectionLine>)));
+        Assert.True(DynamicHttpValidation.RequiresObjectValidation(typeof(CollectionLine[])));
+        Assert.True(DynamicHttpValidation.RequiresObjectValidation(typeof(List<List<CollectionLine>>)));
+        Assert.False(DynamicHttpValidation.RequiresObjectValidation(typeof(List<int>)));
+    }
+
     private sealed class NestedRequest
     {
         [Required]

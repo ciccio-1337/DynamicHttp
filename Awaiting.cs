@@ -64,9 +64,28 @@ internal static class DynamicHttpAwaiting
 
     private static Func<Task, object?> CreateTaskResultAccessor(Type taskType)
     {
-        PropertyInfo? result = taskType.GetProperty(nameof(Task<int>.Result));
+        // Walk the hierarchy to Task<T> instead of looking for a property named "Result" on the
+        // runtime type: a custom non-generic Task subclass may expose an unrelated Result
+        // property, which must not be mistaken for the task's value.
+        Type? genericTask = taskType;
+
+        while (genericTask is not null &&
+            !(genericTask.IsGenericType &&
+              genericTask.GetGenericTypeDefinition() == typeof(Task<>)))
+        {
+            genericTask = genericTask.BaseType;
+        }
+
+        PropertyInfo? result = genericTask?.GetProperty(nameof(Task<int>.Result));
 
         if (result is null)
+        {
+            return static _ => null;
+        }
+
+        // Non-generic Task and async Task methods complete as the internal
+        // Task<VoidTaskResult>; that marker must not leak into the HTTP response as a value.
+        if (genericTask!.GetGenericArguments()[0].FullName == "System.Threading.Tasks.VoidTaskResult")
         {
             return static _ => null;
         }

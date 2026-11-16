@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
 using System.Net;
@@ -966,6 +967,91 @@ public sealed class IntegrationTests
         Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
     }
 
+    [Fact]
+    public async Task Root_collection_body_validation_is_recursive()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var invalid = await client.PostAsync("/api/values/rootcollectionbody",
+            new StringContent("""[{"price":0}]""", Encoding.UTF8, "application/json"));
+        string body = await invalid.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        Assert.Contains("[0].Price", body, StringComparison.Ordinal);
+
+        var valid = await client.PostAsync("/api/values/rootcollectionbody",
+            new StringContent("""[{"price":5}]""", Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+    }
+
+    [Fact]
+    public async Task Query_array_binds_every_value()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        Assert.Equal("\"1,2,3\"",
+            await client.GetStringAsync("/api/values/arrayquery?ids=1&ids=2&ids=3"));
+        Assert.Equal("\"\"", await client.GetStringAsync("/api/values/arrayquery"));
+    }
+
+    [Fact]
+    public async Task Scalar_query_with_multiple_values_uses_the_first()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        Assert.Equal("\"1|\"", await client.GetStringAsync("/api/values/query?page=1&page=2"));
+    }
+
+    [Fact]
+    public async Task Converter_returning_null_for_a_value_type_returns_bad_request()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/nullconverted?value=x");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Converter_throwing_invalid_cast_returns_bad_request()
+    {
+        await using WebApplication app = await StartAppAsync();
+        var client = app.GetTestClient();
+
+        var response = await client.GetAsync("/api/values/throwconverted?value=x");
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Antiforgery_on_interface_method_is_enforced()
+    {
+        await using WebApplication app = await StartAntiforgeryAppAsync();
+        var client = app.GetTestClient();
+
+        var missing = await client.PostAsync("/api/interface-antiforgery/create",
+            new StringContent("", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, missing.StatusCode);
+
+        (string token, string cookie) = await GetAntiforgeryTokenAsync(client);
+        using var request = new HttpRequestMessage(System.Net.Http.HttpMethod.Post,
+            "/api/interface-antiforgery/create")
+        {
+            Content = new StringContent("", Encoding.UTF8, "application/json")
+        };
+        request.Headers.Add("RequestVerificationToken", token);
+        request.Headers.Add("Cookie", cookie);
+
+        var response = await client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
     [Theory]
     [InlineData("999", HttpStatusCode.BadRequest)]
     [InlineData("-1", HttpStatusCode.OK)]
@@ -1146,6 +1232,18 @@ public sealed class ValuesService
     [HttpPost("/collectionbody")]
     public IResult CollectionBody([FromBody] CollectionBodyRequest request) => Results.Ok(request);
 
+    [HttpPost("/rootcollectionbody")]
+    public IResult RootCollectionBody([FromBody] List<CollectionBodyLine> lines) => Results.Ok(lines);
+
+    [HttpGet("/arrayquery")]
+    public string ArrayQuery([FromQuery] int[] ids) => string.Join(",", ids);
+
+    [HttpGet("/nullconverted")]
+    public string NullConverted([FromQuery] NullReturningValue value) => value.ToString();
+
+    [HttpGet("/throwconverted")]
+    public string ThrowingConverted([FromQuery] ThrowingValue value) => value.ToString();
+
     [HttpGet("/notfound/{token}")]
     public string NotFoundWithToken([FromRoute] string token) =>
         throw new NotFoundHttpException("missing");
@@ -1281,4 +1379,47 @@ public sealed class CustomTask<T>(T result) : Task<T>(() => result)
 public sealed class Greeter
 {
     public string Greet(string name) => $"hi {name}";
+}
+
+[TypeConverter(typeof(NullReturningConverter))]
+public readonly struct NullReturningValue
+{
+    public override string ToString() => "null-converted";
+}
+
+public sealed class NullReturningConverter : TypeConverter
+{
+    public override bool CanConvertFrom(ITypeDescriptorContext? context, Type sourceType) =>
+        sourceType == typeof(string);
+
+    public override object? ConvertFrom(ITypeDescriptorContext? context, CultureInfo? culture,
+        object value) => null;
+}
+
+[TypeConverter(typeof(ThrowingConverter))]
+public readonly struct ThrowingValue
+{
+    public override string ToString() => "throwing-converted";
+}
+
+public sealed class ThrowingConverter : TypeConverter
+{
+    public override bool CanConvertFrom(ITypeDescriptorContext? context, Type sourceType) =>
+        sourceType == typeof(string);
+
+    public override object? ConvertFrom(ITypeDescriptorContext? context, CultureInfo? culture,
+        object value) => throw new InvalidCastException("converter-boom");
+}
+
+public interface IInterfaceAntiforgeryService
+{
+    [DynamicAntiforgery]
+    string Create();
+}
+
+[HttpService("/api/interface-antiforgery")]
+public sealed class InterfaceAntiforgeryService : IInterfaceAntiforgeryService
+{
+    [HttpPost("/create")]
+    public string Create() => "interface-antiforgery";
 }

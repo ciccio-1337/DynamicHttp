@@ -119,8 +119,7 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
                         // the service; DynamicHttpExceptionHandler logs them at Information. Log
                         // only unexpected errors here, and mark them so the handler does not log
                         // the same exception a second time.
-                        if (!(exception is OperationCanceledException &&
-                            context.RequestAborted.IsCancellationRequested))
+                        if (!IsClientDisconnect(exception, context.RequestAborted))
                         {
                             context.Items[DynamicHttpExceptionHandler.LoggedExceptionItemKey] = true;
                             logger.LogError(exception,
@@ -251,6 +250,15 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
         }
     }
 
+    /// <summary>
+    /// True when the exception is the expected consequence of the client going away, so it must
+    /// not be logged as a server error. <c>ConnectionResetException</c> derives from
+    /// <see cref="System.IO.IOException"/>.
+    /// </summary>
+    internal static bool IsClientDisconnect(Exception exception, CancellationToken aborted) =>
+        aborted.IsCancellationRequested &&
+        exception is OperationCanceledException or System.IO.IOException;
+
     private static bool IsSafeMethod(string httpMethod) =>
         HttpMethods.IsGet(httpMethod) ||
         HttpMethods.IsHead(httpMethod) ||
@@ -375,8 +383,12 @@ public static class DynamicHttpEndpointRouteBuilderExtensions
             }
 
             // Read at most one byte past the limit so the overflow is detected without
-            // buffering an arbitrarily large chunk.
-            return (int)Math.Min(requested, remaining + 1);
+            // buffering an arbitrarily large chunk. Only add the extra byte when it cannot
+            // overflow: at long.MaxValue, remaining + 1 would wrap to long.MinValue and make
+            // Clamp return 0 (a silent truncated body).
+            long allowed = remaining >= requested ? requested : remaining + 1;
+
+            return (int)allowed;
         }
     }
 }

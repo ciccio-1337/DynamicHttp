@@ -30,7 +30,13 @@ internal static class DynamicHttpValidation
     {
         Queue<Type> queue = new();
         HashSet<Type> visited = [];
-        queue.Enqueue(Unwrap(type));
+
+        // A body may itself be a collection (List<T>, T[], List<List<T>>): warm the element
+        // types, because that is where the DataAnnotations metadata lives.
+        foreach (Type root in ValidationRoots(type))
+        {
+            queue.Enqueue(root);
+        }
 
         while (queue.TryDequeue(out Type? current))
         {
@@ -74,7 +80,12 @@ internal static class DynamicHttpValidation
     {
         Queue<(Type Type, string Path)> queue = new();
         HashSet<Type> visited = [];
-        queue.Enqueue((Unwrap(type), string.Empty));
+
+        // The body can be a collection, in which case the element type carries [BindNever].
+        foreach (Type root in ValidationRoots(type))
+        {
+            queue.Enqueue((root, string.Empty));
+        }
 
         while (queue.TryDequeue(out (Type Type, string Path) current))
         {
@@ -189,7 +200,11 @@ internal static class DynamicHttpValidation
     {
         Queue<Type> queue = new();
         HashSet<Type> visited = [];
-        queue.Enqueue(Unwrap(root));
+
+        foreach (Type rootType in ValidationRoots(root))
+        {
+            queue.Enqueue(rootType);
+        }
 
         while (queue.TryDequeue(out Type? type))
         {
@@ -255,6 +270,28 @@ internal static class DynamicHttpValidation
         if (!type.IsValueType && !visited.Add(value))
         {
             // The graph contains a cycle (or a shared reference); validate each object once.
+            return;
+        }
+
+        if (TryGetEnumerableElementType(type, out _))
+        {
+            // A body root (and any element reached through another collection) can be a
+            // collection: List<T>, T[], List<List<T>>. The DataAnnotations metadata lives on the
+            // elements, never on the collection wrapper, so enumerate instead of inspecting
+            // properties. The visited set above still protects against self-referencing
+            // collections.
+            int index = 0;
+
+            foreach (object? item in (IEnumerable)value)
+            {
+                if (item is not null)
+                {
+                    ValidateNode(item, $"{path}[{index}]", services, results, visited);
+                }
+
+                index++;
+            }
+
             return;
         }
 
@@ -374,6 +411,44 @@ internal static class DynamicHttpValidation
         elementType = type;
 
         return false;
+    }
+
+    /// <summary>
+    /// Expands a candidate body type to the types that can actually carry DataAnnotations
+    /// metadata, unwrapping arbitrary nesting of collections. For a plain object this yields the
+    /// type itself; for <c>List&lt;Foo&gt;</c> it yields <c>Foo</c>; for
+    /// <c>List&lt;List&lt;Foo&gt;&gt;</c> it yields <c>Foo</c>. Simple types are skipped because
+    /// they have no validation graph.
+    /// </summary>
+    private static IEnumerable<Type> ValidationRoots(Type type)
+    {
+        Queue<Type> queue = new();
+        HashSet<Type> visited = [];
+        queue.Enqueue(Unwrap(type));
+
+        while (queue.TryDequeue(out Type? current))
+        {
+            current = Unwrap(current);
+
+            if (current == typeof(string) || IsSimple(current))
+            {
+                continue;
+            }
+
+            if (TryGetEnumerableElementType(current, out Type elementType))
+            {
+                // Recurse instead of yielding the collection wrapper: List<List<Foo>> must
+                // produce Foo, not List<Foo>.
+                queue.Enqueue(elementType);
+
+                continue;
+            }
+
+            if (visited.Add(current))
+            {
+                yield return current;
+            }
+        }
     }
 
     private static Type Unwrap(Type type) => Nullable.GetUnderlyingType(type) ?? type;

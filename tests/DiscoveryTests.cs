@@ -424,6 +424,143 @@ public sealed class DiscoveryTests
         Assert.Single(endpoint.Responses);
     }
 
+    [Fact]
+    public void BindNever_on_root_collection_element_throws_configuration_error()
+    {
+        var method = typeof(BindNeverRootCollectionService)
+            .GetMethod(nameof(BindNeverRootCollectionService.Post))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(BindNeverRootCollectionService), method));
+
+        Assert.Contains("BindNever", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Secret", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BindNever_on_root_array_element_throws_configuration_error()
+    {
+        var method = typeof(BindNeverRootArrayService)
+            .GetMethod(nameof(BindNeverRootArrayService.Post))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.BuildParameters(typeof(BindNeverRootArrayService), method));
+
+        Assert.Contains("Secret", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Antiforgery_attribute_on_interface_method_is_honored()
+    {
+        var endpoints = DynamicHttpDiscovery.Build([typeof(DiscoveryTests).Assembly]);
+        var endpoint = Assert.Single(endpoints, x => x.ServiceType == typeof(InterfaceAntiforgeryService));
+
+        Assert.True(endpoint.RequireAntiforgery);
+    }
+
+    [Theory]
+    [InlineData(nameof(WhitespaceAuthorizationService.WhitespacePolicy))]
+    [InlineData(nameof(WhitespaceAuthorizationService.WhitespaceRoles))]
+    [InlineData(nameof(WhitespaceAuthorizationService.WhitespaceSchemes))]
+    [InlineData(nameof(WhitespaceAuthorizationService.WhitespaceFrameworkPolicy))]
+    public void Whitespace_authorization_values_throw_configuration_error(string methodName)
+    {
+        var method = typeof(WhitespaceAuthorizationService).GetMethod(methodName)!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.GetAuthorization(typeof(WhitespaceAuthorizationService), method));
+
+        Assert.Contains("whitespace-only", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Unspecified_authorization_values_remain_null()
+    {
+        var method = typeof(WhitespaceAuthorizationService)
+            .GetMethod(nameof(WhitespaceAuthorizationService.Plain))!;
+
+        var authorization = Assert.Single(
+            DynamicHttpDiscovery.GetAuthorization(typeof(WhitespaceAuthorizationService), method));
+
+        Assert.Null(authorization.Policy);
+        Assert.Null(authorization.Roles);
+        Assert.Null(authorization.AuthenticationSchemes);
+    }
+
+    [Fact]
+    public void Service_without_public_constructor_throws_configuration_error()
+    {
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateServiceType(typeof(UnconstructibleService)));
+
+        Assert.Contains("constructor", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Ref_return_endpoint_method_throws_configuration_error()
+    {
+        var method = typeof(RefReturnEndpoint).GetMethod(nameof(RefReturnEndpoint.Get))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateEndpointMethod(typeof(RefReturnEndpoint), method));
+
+        Assert.Contains("by reference", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Ref_struct_return_endpoint_method_throws_configuration_error()
+    {
+        var method = typeof(SpanReturnEndpoint).GetMethod(nameof(SpanReturnEndpoint.Get))!;
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateEndpointMethod(typeof(SpanReturnEndpoint), method));
+
+        Assert.Contains("ref struct", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Ref_struct_parameter_throws_configuration_error()
+    {
+        var method = typeof(SpanParameterEndpoint).GetMethod(nameof(SpanParameterEndpoint.Get))!;
+        var parameters = DynamicHttpDiscovery.BuildParameters(typeof(SpanParameterEndpoint), method);
+
+        var exception = Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateParameters(
+                "/api/span", parameters, typeof(SpanParameterEndpoint), method));
+
+        Assert.Contains("ref struct", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("/api/{id:int}", "/api/{id:datetime}")]
+    [InlineData("/api/{id:alpha}", "/api/{id:datetime}")]
+    [InlineData("/api/{id:bool}", "/api/{id:alpha}")]
+    public void Overlapping_constraints_conflict(string left, string right)
+    {
+        EndpointDefinition[] endpoints =
+        [
+            CreateEndpoint(left),
+            CreateEndpoint(right)
+        ];
+
+        Assert.Throws<DynamicHttpConfigurationException>(() =>
+            DynamicHttpDiscovery.ValidateConflicts(endpoints));
+    }
+
+    [Theory]
+    [InlineData("/api/{id:int}", "/api/{id:guid}")]
+    [InlineData("/api/{id:bool}", "/api/{id:int}")]
+    public void Disjoint_constraint_families_do_not_conflict(string left, string right)
+    {
+        EndpointDefinition[] endpoints =
+        [
+            CreateEndpoint(left),
+            CreateEndpoint(right)
+        ];
+
+        DynamicHttpDiscovery.ValidateConflicts(endpoints);
+    }
+
     private const string TestScheme = "Test";
 
     private static EndpointDefinition CreateEndpoint(string route) => new(
@@ -657,5 +794,68 @@ public sealed class DiscoveryTests
         [HttpGet]
         [ProducesResponseType(200)]
         public string Get() => "x";
+    }
+
+    private sealed class BindNeverRootCollectionService
+    {
+        public string Post([FromBody] List<BindNeverItem> items) => items.Count.ToString();
+    }
+
+    private sealed class BindNeverRootArrayService
+    {
+        public string Post([FromBody] BindNeverItem[] items) => items.Length.ToString();
+    }
+
+    private interface IInterfaceAntiforgery
+    {
+        [DynamicAntiforgery]
+        string Create();
+    }
+
+    [HttpService("/api/antiforgery-interface")]
+    private sealed class InterfaceAntiforgeryService : IInterfaceAntiforgery
+    {
+        [HttpPost("/create")]
+        public string Create() => "created";
+    }
+
+    private sealed class WhitespaceAuthorizationService
+    {
+        [DynamicAuthorize(Policy = " ")]
+        public string WhitespacePolicy() => "x";
+
+        [DynamicAuthorize(Roles = " ")]
+        public string WhitespaceRoles() => "x";
+
+        [DynamicAuthorize(AuthenticationSchemes = " ")]
+        public string WhitespaceSchemes() => "x";
+
+        [Authorize(Policy = " ")]
+        public string WhitespaceFrameworkPolicy() => "x";
+
+        [Authorize]
+        public string Plain() => "x";
+    }
+
+    private sealed class UnconstructibleService
+    {
+        private UnconstructibleService() { }
+    }
+
+    private sealed class RefReturnEndpoint
+    {
+        private int _value;
+
+        public ref int Get() => ref _value;
+    }
+
+    private sealed class SpanReturnEndpoint
+    {
+        public Span<int> Get() => new int[1];
+    }
+
+    private sealed class SpanParameterEndpoint
+    {
+        public string Get(Span<int> values) => values.Length.ToString();
     }
 }

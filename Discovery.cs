@@ -69,6 +69,15 @@ internal static class DynamicHttpDiscovery
             throw new DynamicHttpConfigurationException(
                 $"DynamicHttp configuration error for '{serviceType.FullName}': open generic services are not supported.");
         }
+
+        // Discovery registers every service with the DI container, so the container must be able
+        // to construct it. Failing here turns a request-time 500 into a startup error.
+        if (serviceType.GetConstructors(BindingFlags.Public | BindingFlags.Instance).Length == 0)
+        {
+            throw new DynamicHttpConfigurationException(
+                $"DynamicHttp configuration error for '{serviceType.FullName}': the service type has no " +
+                "public instance constructor, so dependency injection cannot create it.");
+        }
     }
 
     public static IReadOnlyList<EndpointDefinition> Build(IEnumerable<Assembly> assemblies,
@@ -166,6 +175,26 @@ internal static class DynamicHttpDiscovery
         if (method.IsGenericMethodDefinition)
         {
             throw Configuration(serviceType, method, "Generic endpoint methods are not supported.");
+        }
+
+        // The invoker boxes the return value into object. A by-ref, pointer or ref struct return
+        // type cannot be boxed, and would otherwise fail inside the expression tree with a raw
+        // ArgumentException instead of a configuration error.
+        if (method.ReturnType.IsByRef)
+        {
+            throw Configuration(serviceType, method,
+                "Endpoint methods cannot return by reference; return the value instead.");
+        }
+
+        if (method.ReturnType.IsPointer)
+        {
+            throw Configuration(serviceType, method, "Pointer return types are not supported.");
+        }
+
+        if (method.ReturnType.IsByRefLike)
+        {
+            throw Configuration(serviceType, method,
+                $"Return type '{method.ReturnType.Name}' is a ref struct and cannot be boxed into an HTTP result.");
         }
 
         if (method.ReturnType == typeof(void) &&
@@ -365,24 +394,24 @@ internal static class DynamicHttpDiscovery
     /// metadata. Attributes declared on implemented interfaces are included at both type and
     /// method level. All of them are applied, so mixing the two attribute families is fail-closed.
     /// </summary>
-    private static AuthorizeAttribute[] GetAuthorization(Type serviceType, MethodInfo method)
+    internal static AuthorizeAttribute[] GetAuthorization(Type serviceType, MethodInfo method)
     {
         List<AuthorizeAttribute> result = [];
 
         foreach (Type scope in GetTypesInScope(serviceType))
         {
             result.AddRange(scope.GetCustomAttributes(inherit: true).OfType<IAuthorizeData>()
-                .Select(ToAuthorizeAttribute));
+                .Select(data => ToAuthorizeAttribute(data, serviceType, method)));
             result.AddRange(scope.GetCustomAttributes<DynamicAuthorizeAttribute>(true)
-                .Select(ToAuthorizeAttribute));
+                .Select(data => ToAuthorizeAttribute(data, serviceType, method)));
         }
 
         foreach (MethodInfo scope in GetMethodsInScope(serviceType, method))
         {
             result.AddRange(scope.GetCustomAttributes(inherit: true).OfType<IAuthorizeData>()
-                .Select(ToAuthorizeAttribute));
+                .Select(data => ToAuthorizeAttribute(data, serviceType, method)));
             result.AddRange(scope.GetCustomAttributes<DynamicAuthorizeAttribute>(true)
-                .Select(ToAuthorizeAttribute));
+                .Select(data => ToAuthorizeAttribute(data, serviceType, method)));
         }
 
         return [.. result
@@ -390,21 +419,45 @@ internal static class DynamicHttpDiscovery
             .Select(group => group.First())];
     }
 
-    private static AuthorizeAttribute ToAuthorizeAttribute(IAuthorizeData data) =>
-        CreateAuthorization(data.Policy, data.Roles, data.AuthenticationSchemes);
+    private static AuthorizeAttribute ToAuthorizeAttribute(IAuthorizeData data,
+        Type serviceType, MethodInfo method) =>
+        CreateAuthorization(data.Policy, data.Roles, data.AuthenticationSchemes, serviceType, method);
 
-    private static AuthorizeAttribute ToAuthorizeAttribute(DynamicAuthorizeAttribute data) =>
-        CreateAuthorization(data.Policy, data.Roles, data.AuthenticationSchemes);
+    private static AuthorizeAttribute ToAuthorizeAttribute(DynamicAuthorizeAttribute data,
+        Type serviceType, MethodInfo method) =>
+        CreateAuthorization(data.Policy, data.Roles, data.AuthenticationSchemes, serviceType, method);
 
-    private static AuthorizeAttribute CreateAuthorization(string? policy, string? roles, string? schemes) =>
+    private static AuthorizeAttribute CreateAuthorization(string? policy, string? roles, string? schemes,
+        Type serviceType, MethodInfo method) =>
         new()
         {
-            Policy = Whitelist(policy),
-            Roles = Whitelist(roles),
-            AuthenticationSchemes = Whitelist(schemes)
+            Policy = NormalizeAuthorizationValue(policy, nameof(AuthorizeAttribute.Policy), serviceType, method),
+            Roles = NormalizeAuthorizationValue(roles, nameof(AuthorizeAttribute.Roles), serviceType, method),
+            AuthenticationSchemes = NormalizeAuthorizationValue(
+                schemes, nameof(AuthorizeAttribute.AuthenticationSchemes), serviceType, method)
         };
 
-    private static string? Whitelist(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
+    /// <summary>
+    /// A null value means "not specified" and is preserved. A whitespace-only value, however, is
+    /// a configuration mistake: dropping it would silently weaken the intended authorization
+    /// (for example <c>Roles = " "</c> would become "no role required").
+    /// </summary>
+    private static string? NormalizeAuthorizationValue(string? value, string field,
+        Type serviceType, MethodInfo method)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw Configuration(serviceType, method,
+                $"Authorization attribute value '{field}' is whitespace-only; remove it or specify a value.");
+        }
+
+        return value;
+    }
 
     private static IEnumerable<Type> GetTypesInScope(Type serviceType) =>
         [serviceType, .. serviceType.GetInterfaces()];
@@ -471,7 +524,15 @@ internal static class DynamicHttpDiscovery
         method.GetCustomAttributes(inherit: true).OfType<IAuthorizeData>().Any();
 
     private static bool IsAntiforgeryRequired(Type serviceType, MethodInfo method) =>
-        serviceType.IsDefined(typeof(DynamicAntiforgeryAttribute), true) ||
+        IsAntiforgeryOnType(serviceType) ||
+        serviceType.GetInterfaces().Any(IsAntiforgeryOnType) ||
+        IsAntiforgeryOnMethod(method) ||
+        GetInterfaceMethods(serviceType, method).Any(IsAntiforgeryOnMethod);
+
+    private static bool IsAntiforgeryOnType(Type type) =>
+        type.IsDefined(typeof(DynamicAntiforgeryAttribute), true);
+
+    private static bool IsAntiforgeryOnMethod(MethodInfo method) =>
         method.IsDefined(typeof(DynamicAntiforgeryAttribute), true);
 
     internal static string CombineRoutes(string? prefix, string? template)
@@ -523,6 +584,21 @@ internal static class DynamicHttpDiscovery
         foreach (var parameter in parameters.Where(x => x.Parameter.ParameterType.IsByRef))
         {
             throw Configuration(service, method, $"Parameter '{parameter.Name}' cannot be bound: 'ref'/'out'/'in' parameters are not supported.");
+        }
+
+        foreach (var parameter in parameters)
+        {
+            if (parameter.ParameterType.IsPointer)
+            {
+                throw Configuration(service, method,
+                    $"Parameter '{parameter.Name}' cannot be bound: pointer types are not supported.");
+            }
+
+            if (parameter.ParameterType.IsByRefLike)
+            {
+                throw Configuration(service, method,
+                    $"Parameter '{parameter.Name}' cannot be bound: ref struct types such as 'Span<T>' are not supported.");
+            }
         }
 
         int bodyCount = parameters.Count(x => x.Kind == BindingKind.Body);
@@ -649,9 +725,18 @@ internal static class DynamicHttpDiscovery
         }
 
         return leftKind == rightKind ||
-            (leftKind == ConstraintKind.Boolean && rightKind == ConstraintKind.Alpha) ||
-            (leftKind == ConstraintKind.Alpha && rightKind == ConstraintKind.Boolean);
+            (IsNumericLike(leftKind) && IsNumericLike(rightKind)) ||
+            (IsAlphaLike(leftKind) && IsAlphaLike(rightKind));
     }
+
+    // DateTime overlaps both families at runtime: DateTime.TryParse("5") succeeds and so does
+    // DateTime.TryParse("May"), while int and alpha constraints accept those values. Treating
+    // datetime as disjoint from either family would let an ambiguous pair through.
+    private static bool IsNumericLike(ConstraintKind kind) =>
+        kind is ConstraintKind.Numeric or ConstraintKind.DateTime;
+
+    private static bool IsAlphaLike(ConstraintKind kind) =>
+        kind is ConstraintKind.Alpha or ConstraintKind.Boolean or ConstraintKind.DateTime;
 
     private static ConstraintKind ClassifyConstraints(
         IReadOnlyList<RoutePatternParameterPolicyReference> policies)
